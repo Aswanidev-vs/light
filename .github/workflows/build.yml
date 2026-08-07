@@ -218,7 +218,7 @@ jobs:
           # would break host builds (such as go install) by forcing an
           # aarch64 compiler onto x86_64 assembly.
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
-          echo "CGO_CFLAGS=-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" >> $GITHUB_ENV
+          echo "CGO_CFLAGS=-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23" >> $GITHUB_ENV
           echo "CGO_LDFLAGS=-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib" >> $GITHUB_ENV
 
       - name: Install Linux dependencies
@@ -244,7 +244,7 @@ jobs:
           # Enable CGO and point to the NDK sysroot headers/libs so C headers
           # like android/log.h can be found during binding generation.
           export CGO_ENABLED=1
-          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23"
           export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
           export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
           GOOS=android GOARCH=arm64 wails3 generate bindings -f "-tags=android" -clean=true -ts
@@ -286,14 +286,19 @@ jobs:
           fi
 
       - name: Build Android APK (fat)
-        env:
-          GOOS: android
-          GOARCH: arm64
-          CGO_ENABLED: 1
-          CC: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang
-          CGO_CFLAGS: -I${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
-          CGO_LDFLAGS: -L${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib
-        run: wails3 task android:package:fat
+        run: |
+          set -euo pipefail
+          # Use the runtime-provided ANDROID_NDK_HOME from GITHUB_ENV.
+          export GOOS=android
+          export GOARCH=arm64
+          export CGO_ENABLED=1
+          export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
+          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23"
+          export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+          echo "Using CC=$CC"
+          "$CC" --version
+          GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC="$CC" wails3 task android:package:fat
+        shell: bash
 
 
       - name: Find APK files
