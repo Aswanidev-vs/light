@@ -209,26 +209,17 @@ tasks:
         chmod +x ./gradlew
         ./gradlew assembleRelease --stacktrace --warning-mode all
 
-        # Copy split and universal APKs with descriptive names
+        # Copy only arm64-v8a APK (primary target for physical devices)
         OUT_DIR="app/build/outputs/apk/release"
         mkdir -p "../../{{.BIN_DIR}}"
 
         if [ -f "$OUT_DIR/app-arm64-v8a-release.apk" ]; then
-          cp "$OUT_DIR/app-arm64-v8a-release.apk" "../../{{.BIN_DIR}}/{{.APP_NAME}}-arm64-v8a.apk"
           cp "$OUT_DIR/app-arm64-v8a-release.apk" "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+          echo "Release APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk (arm64-v8a)"
+        else
+          echo "ERROR: arm64-v8a release APK not found"
+          exit 1
         fi
-        if [ -f "$OUT_DIR/app-universal-release.apk" ]; then
-          cp "$OUT_DIR/app-universal-release.apk" "../../{{.BIN_DIR}}/{{.APP_NAME}}-universal.apk"
-        fi
-        if [ -f "$OUT_DIR/app-x86_64-release.apk" ]; then
-          cp "$OUT_DIR/app-x86_64-release.apk" "../../{{.BIN_DIR}}/{{.APP_NAME}}-x86_64.apk"
-        fi
-        if [ -f "$OUT_DIR/app-release.apk" ]; then
-          cp "$OUT_DIR/app-release.apk" "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
-        fi
-
-        echo "Release APKs created in {{.BIN_DIR}}:"
-        ls -lh "../../{{.BIN_DIR}}/"*.apk
 
   assemble:aab:
     summary: Assembles a debug AAB (Android App Bundle) using Gradle
