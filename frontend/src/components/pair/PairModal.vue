@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { QRCodeService, DiscoveryService } from '../../../bindings/light/internal/light'
 import { useDiscovery } from '../../composables/useDiscovery'
 import { useUI } from '../../composables/useUI'
@@ -13,9 +13,21 @@ const myCode = ref('')
 const code = ref('')
 const scanning = ref(false)
 const videoEl = ref<HTMLVideoElement | null>(null)
+const viewportHeight = ref('100dvh')
 
 let stream: MediaStream | null = null
 let raf = 0
+let viewportHandler: (() => void) | null = null
+
+onMounted(() => {
+  const vv = window.visualViewport
+  if (vv) {
+    const update = () => { viewportHeight.value = `${vv.height}px` }
+    vv.addEventListener('resize', update)
+    update()
+    viewportHandler = () => vv.removeEventListener('resize', update)
+  }
+})
 
 ;(async () => {
   qr.value = await QRCodeService.GetDeviceQRCode()
@@ -123,12 +135,19 @@ async function onScanResult(text: string) {
   }
 }
 
-onBeforeUnmount(stopScan)
+onBeforeUnmount(() => {
+  stopScan()
+  viewportHandler?.()
+})
 </script>
 
 <template>
-  <div class="fixed inset-0 z-[1100] grid place-items-center bg-black/50 p-4" @click.self="close">
-    <div class="card w-full max-w-md animate-slideUp p-5">
+  <div
+    class="fixed inset-x-0 bottom-0 top-0 z-[1100] flex items-end justify-center bg-black/50 sm:items-center sm:p-4"
+    :style="{ height: viewportHeight }"
+    @click.self="close"
+  >
+    <div class="card w-full max-w-md animate-slideUp overflow-y-auto p-5" :class="scanning ? '' : 'max-h-[85vh]'">
       <div class="mb-4 flex items-center justify-between">
         <h2 class="flex items-center gap-2 font-semibold">
           <Icon name="qrcode" /> Pair a device
@@ -142,7 +161,7 @@ onBeforeUnmount(stopScan)
       </div>
 
       <div v-else class="flex flex-col items-center gap-3">
-        <img v-if="qr" :src="qr" class="h-44 w-44 rounded-lg bg-white p-2" alt="Your QR code" />
+        <img v-if="qr" :src="qr" class="h-36 w-36 rounded-lg bg-white p-2 sm:h-44 sm:w-44" alt="Your QR code" />
         <p class="text-xs text-content-faint">Others scan this to connect</p>
         <div class="rounded-lg bg-surface-2 px-4 py-2 font-mono text-lg tracking-widest">{{ myCode }}</div>
         <button class="btn-ghost w-full" @click="startScan"><Icon name="qrcode" /> Scan a code</button>
@@ -156,9 +175,9 @@ onBeforeUnmount(stopScan)
             inputmode="numeric"
             maxlength="6"
             placeholder="000000"
-            class="flex-1 rounded-lg border border-white/10 bg-surface-2 px-3 py-2 font-mono tracking-widest outline-none focus:border-accent"
+            class="min-w-0 flex-1 rounded-lg border border-white/10 bg-surface-2 px-3 py-2 font-mono tracking-widest outline-none focus:border-accent"
           />
-          <button class="btn-accent" @click="pairByCode">Connect</button>
+          <button class="btn-accent shrink-0" @click="pairByCode">Connect</button>
         </div>
       </div>
     </div>

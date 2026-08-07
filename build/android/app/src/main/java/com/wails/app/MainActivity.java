@@ -19,6 +19,7 @@ import android.os.PowerManager;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
@@ -40,6 +41,7 @@ import androidx.webkit.WebViewAssetLoader;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -379,7 +381,10 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * Handle the result from the folder picker (SAF).
-     * Converts the tree URI to a readable path and emits it to JavaScript.
+     * Takes a persistable read/write grant on the tree URI, converts it to a
+     * readable path, and emits both to JavaScript so the frontend can store the
+     * display path AND use the tree URI to copy finished downloads into the
+     * folder (scoped storage forbids raw-path writes to shared storage).
      */
     private void handleFolderPickerResult(int resultCode, @Nullable Intent data) {
         if (resultCode != RESULT_OK || data == null || data.getData() == null) {
@@ -389,9 +394,11 @@ public class MainActivity extends AppCompatActivity {
 
         Uri treeUri = data.getData();
         try {
-            // Take persistable permission so we can access the folder later
+            // Take persistable read+write permission so we can copy into the
+            // folder later, even after the app restarts.
             getContentResolver().takePersistableUriPermission(treeUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
 
             // Extract the path from the tree URI
             String path = treeUri.getPath();
@@ -406,11 +413,65 @@ public class MainActivity extends AppCompatActivity {
             }
 
             bridge.emitEvent("android:folderPicked",
-                    "{\"path\":\"" + path.replace("\"", "\\\"") + "\"}");
+                    "{\"path\":\"" + path.replace("\"", "\\\"") + "\",\"uri\":\""
+                            + treeUri.toString().replace("\"", "\\\"") + "\"}");
         } catch (Exception e) {
             Log.e(TAG, "Failed to handle folder picker result", e);
             bridge.emitEvent("android:folderPicked", "{\"error\":\"" + e.getMessage() + "\"}");
         }
+    }
+
+    /**
+     * Copy a finished download (staged in app-internal storage by the Go
+     * receiver) into the SAF folder the user picked. Creates the document via
+     * the persisted tree URI, streams the bytes through ContentResolver, then
+     * deletes the staging file. json: {"uri","fileName","sourcePath"}.
+     */
+    public void copyToFolder(final String json) {
+        new Thread(() -> {
+            try {
+                JSONObject o = new JSONObject(json);
+                Uri treeUri = Uri.parse(o.getString("uri"));
+                String fileName = o.optString("fileName", "file");
+                java.io.File source = new java.io.File(o.getString("sourcePath"));
+                if (!source.exists()) {
+                    bridge.emitEvent("android:copyDone",
+                            "{\"ok\":false,\"error\":\"staging file missing\"}");
+                    return;
+                }
+
+                // Create the destination document in the chosen folder.
+                String mime = android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(fileName.contains(".")
+                                ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase()
+                                : "");
+                Uri docUri = DocumentsContract.createDocument(getContentResolver(),
+                        treeUri, mime != null ? mime : "application/octet-stream", fileName);
+
+                try (InputStream in = new FileInputStream(source);
+                     OutputStream out = getContentResolver().openOutputStream(docUri)) {
+                    if (out == null) {
+                        bridge.emitEvent("android:copyDone",
+                                "{\"ok\":false,\"error\":\"cannot open destination\"}");
+                        return;
+                    }
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                    }
+                }
+                // Staging copy is no longer needed.
+                boolean deleted = source.delete();
+                bridge.emitEvent("android:copyDone",
+                        "{\"ok\":true,\"fileName\":\"" + fileName.replace("\"", "\\\"")
+                                + "\",\"deleted\":" + deleted + "}");
+            } catch (Exception e) {
+                Log.e(TAG, "copyToFolder failed", e);
+                bridge.emitEvent("android:copyDone",
+                        "{\"ok\":false,\"error\":\"" + e.getMessage() + "\"}");
+            }
+        }).start();
     }
 
     /** Downscale a captured photo into a base64 JPEG data URL for display in the webview. */
@@ -569,7 +630,11 @@ public class MainActivity extends AppCompatActivity {
      */
     public void launchFolderPicker(String callbackID) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        // WRITE + PERSISTABLE are both required: the result's WRITE grant must
+        // be requested up front, or takePersistableUriPermission(READ|WRITE)
+        // throws SecurityException downstream.
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try {
             pendingFolderPickerCallbackID = callbackID.hashCode();

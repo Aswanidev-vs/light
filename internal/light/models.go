@@ -80,6 +80,7 @@ type Settings struct {
 	DeviceName       string `json:"deviceName"`
 	Port             int    `json:"port"`
 	DownloadDir      string `json:"downloadDir"`
+	DownloadDirUri   string `json:"downloadDirUri"` // Android SAF tree URI for the chosen folder
 	AutoAccept       bool   `json:"autoAccept"`
 	Theme            string `json:"theme"`
 	EnableEncryption bool   `json:"enableEncryption"`

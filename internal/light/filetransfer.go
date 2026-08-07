@@ -191,9 +191,14 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dl := s.settings.GetSettings().DownloadDir
+	dl := s.receiveDir()
 	_ = os.MkdirAll(dl, 0o755)
 	path := uniquePath(filepath.Join(dl, sanitize(fname)))
+	// Record the real destination the user chose. On mobile the file is first
+	// written to an app-internal staging dir (SAF folders aren't raw-writable
+	// under scoped storage); the frontend then bridges the finished file into
+	// the chosen folder via the SAF tree URI.
+	dest := s.settings.GetSettings().DownloadDir
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		http.Error(w, "cannot open destination", 500)
@@ -255,10 +260,23 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
 			"id": subID, "filename": fname, "filePath": path, "checksum": sum,
+			"destination": dest, "destinationUri": s.settings.GetSettings().DownloadDirUri,
 		})
 	}
 	w.WriteHeader(200)
 	w.Write([]byte("ok"))
+}
+
+// receiveDir returns the directory the receiver writes incoming files to. On
+// mobile the chosen SAF folder is not raw-filesystem-writable under scoped
+// storage, so we stage into an app-internal dir; desktop honours DownloadDir.
+func (s *FileTransferService) receiveDir() string {
+	if PlatformDeviceType() == DeviceTypeMobile {
+		dir := filepath.Join(configDir(), "downloads")
+		_ = os.MkdirAll(dir, 0o755)
+		return dir
+	}
+	return s.settings.GetSettings().DownloadDir
 }
 
 // ---- Sender side ----

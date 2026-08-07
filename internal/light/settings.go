@@ -102,6 +102,7 @@ func (s *SettingsService) UpdateSettings(s2 Settings) {
 	s.cfg.DeviceName = s2.DeviceName
 	s.cfg.Port = s2.Port
 	s.cfg.DownloadDir = s2.DownloadDir
+	s.cfg.DownloadDirUri = s2.DownloadDirUri
 	s.cfg.AutoAccept = s2.AutoAccept
 	s.cfg.Theme = s2.Theme
 	s.cfg.EnableEncryption = s2.EnableEncryption
@@ -110,11 +111,12 @@ func (s *SettingsService) UpdateSettings(s2 Settings) {
 	s.emit()
 }
 
-func (s *SettingsService) SetDeviceName(n string) { s.set(func(c *Settings) { c.DeviceName = n }) }
-func (s *SettingsService) SetPort(p int)          { s.set(func(c *Settings) { c.Port = p }) }
-func (s *SettingsService) SetDownloadDir(d string) { s.set(func(c *Settings) { c.DownloadDir = d }) }
-func (s *SettingsService) SetAutoAccept(b bool)   { s.set(func(c *Settings) { c.AutoAccept = b }) }
-func (s *SettingsService) SetTheme(t string)     { s.set(func(c *Settings) { c.Theme = t }) }
+func (s *SettingsService) SetDeviceName(n string)   { s.set(func(c *Settings) { c.DeviceName = n }) }
+func (s *SettingsService) SetPort(p int)            { s.set(func(c *Settings) { c.Port = p }) }
+func (s *SettingsService) SetDownloadDir(d string)  { s.set(func(c *Settings) { c.DownloadDir = d }) }
+func (s *SettingsService) SetDownloadDirUri(u string) { s.set(func(c *Settings) { c.DownloadDirUri = u }) }
+func (s *SettingsService) SetAutoAccept(b bool)     { s.set(func(c *Settings) { c.AutoAccept = b }) }
+func (s *SettingsService) SetTheme(t string)        { s.set(func(c *Settings) { c.Theme = t }) }
 
 func (s *SettingsService) set(mut func(*Settings)) {
 	s.mu.Lock()
