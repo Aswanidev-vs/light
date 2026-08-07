@@ -218,7 +218,7 @@ jobs:
           # would break host builds (such as go install) by forcing an
           # aarch64 compiler onto x86_64 assembly.
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
-          echo "CGO_CFLAGS=-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23" >> $GITHUB_ENV
+          echo "CGO_CFLAGS=-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23 -D_Nullable= -D_Nonnull=" >> $GITHUB_ENV
           echo "CGO_LDFLAGS=-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib" >> $GITHUB_ENV
 
       - name: Install Linux dependencies
@@ -244,7 +244,7 @@ jobs:
           # Enable CGO and point to the NDK sysroot headers/libs so C headers
           # like android/log.h can be found during binding generation.
           export CGO_ENABLED=1
-          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23"
+          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23 -D_Nullable= -D_Nonnull="
           export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
           export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
           GOOS=android GOARCH=arm64 wails3 generate bindings -f "-tags=android" -clean=true -ts
@@ -293,7 +293,7 @@ jobs:
           export GOARCH=arm64
           export CGO_ENABLED=1
           export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
-          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23"
+          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D__ANDROID_API__=23 -D_Nullable= -D_Nonnull="
           export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
           echo "Using CC=$CC"
           "$CC" --version
