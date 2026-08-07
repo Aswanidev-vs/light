@@ -132,12 +132,11 @@ public class WailsBridge {
             return;
         }
         try {
+            // Write the staging marker BEFORE nativeInit: Go's configDir() runs
+            // during nativeInit and needs the marker to exist at that point.
+            writeStagingMarker();
             nativeInit(this);
             initialized = true;
-            // Write the app's internal files directory to a marker file so Go can
-            // discover a guaranteed-writable staging path on Android (where
-            // os.UserHomeDir / os.Getwd return non-writable paths like "/").
-            writeStagingMarker();
             Log.i(TAG, "Wails bridge initialized");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize Wails bridge", e);

@@ -50,20 +50,20 @@ const hasTransfers = computed(() => transfers.value.length > 0)
 </script>
 
 <template>
-  <div class="flex h-full flex-col gap-5 p-5 md:p-8">
+  <div class="flex h-full flex-col gap-5 p-4 sm:p-5 md:p-8">
     <div
-      class="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/10 bg-surface-0/30 px-6 py-12 text-center transition hover:border-accent/40 hover:bg-accent-soft/30"
+      class="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/10 bg-surface-0/30 px-4 py-8 text-center transition hover:border-accent/40 hover:bg-accent-soft/30 sm:px-6 sm:py-12"
       :class="dragOver ? 'border-accent bg-accent-soft' : ''"
       @click="pickFiles"
       @dragover.prevent="dragOver = true"
       @dragleave.prevent="dragOver = false"
       @drop.prevent="onDrop"
     >
-      <div class="mb-3 grid h-14 w-14 place-items-center rounded-full bg-surface-2 text-accent">
-        <Icon name="upload" :size="26" />
+      <div class="mb-3 grid h-12 w-12 place-items-center rounded-full bg-surface-2 text-accent sm:h-14 sm:w-14">
+        <Icon name="upload" :size="24" />
       </div>
-      <p class="font-medium">Drop files or click to browse</p>
-      <p class="text-sm text-content-faint">Sending to {{ device.name }}</p>
+      <p class="min-w-0 font-medium">Drop files or click to browse</p>
+      <p class="min-w-0 text-sm text-content-faint">Sending to {{ device.name }}</p>
     </div>
 
     <div class="flex-1 overflow-auto">

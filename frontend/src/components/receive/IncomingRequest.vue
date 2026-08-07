@@ -28,7 +28,7 @@ async function reject() {
 <template>
   <div
     v-if="pendingReceive"
-    class="fixed inset-0 z-[1000] grid place-items-center bg-black/50 p-4"
+    class="fixed inset-0 z-[1000] flex items-end justify-center bg-black/50 p-4 sm:grid sm:place-items-center"
     @click.self="reject"
   >
     <div class="card w-full max-w-md animate-slideUp p-5">
@@ -52,14 +52,14 @@ async function reject() {
             class="accent-accent"
             @change="toggle(f.name)"
           />
-          <span class="flex-1 truncate text-sm">{{ f.name }}</span>
-          <span class="text-xs text-content-faint">{{ formatBytes(f.size) }}</span>
+          <span class="min-w-0 flex-1 truncate text-sm">{{ f.name }}</span>
+          <span class="shrink-0 text-xs text-content-faint">{{ formatBytes(f.size) }}</span>
         </li>
       </ul>
 
-      <div class="flex gap-2">
-        <button class="btn-ghost flex-1 border border-white/10" @click="reject">Decline</button>
-        <button class="btn-accent flex-1" @click="accept">Accept {{ pendingReceive.selected.length }}</button>
+      <div class="flex flex-col gap-2 sm:flex-row">
+        <button class="btn-ghost order-2 flex-1 border border-white/10 sm:order-1" @click="reject">Decline</button>
+        <button class="btn-accent order-1 flex-1 sm:order-2" @click="accept">Accept {{ pendingReceive.selected.length }}</button>
       </div>
     </div>
   </div>
