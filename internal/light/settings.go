@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -20,23 +19,17 @@ const (
 
 func configDir() string {
 	// On Android, os.UserHomeDir() and os.Getwd() return non-writable paths
-	// (often "/" or "."), so raw filesystem writes fail. Java writes the app's
-	// internal files directory to a marker file during bridge init — read it
-	// first for a guaranteed-writable staging path.
+	// (often "/" or "."), so raw filesystem writes fail. Try the app's internal
+	// storage directly — it's the only directory guaranteed writable under
+	// scoped storage.
 	if runtime.GOOS == "android" {
-		if marker := readAndroidStagingMarker(); marker != "" {
-			dir := filepath.Join(marker, ".light")
-			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
-				return dir
-			}
+		if d := androidInternalDir(); d != "" {
+			return d
 		}
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" || home == "." {
-		// On Android, os.UserHomeDir() may fail or return "." (root), which is
-		// not writable. Fall back to the working directory — on Android, the Go
-		// library runs in the app process where CWD is the data directory.
 		if cwd, cwdErr := os.Getwd(); cwdErr == nil && cwd != "" && cwd != "/" {
 			home = cwd
 		} else {
@@ -45,36 +38,37 @@ func configDir() string {
 	}
 	dir := filepath.Join(home, ".light")
 	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
-		// Last resort: try the OS temp directory.
 		dir = filepath.Join(os.TempDir(), ".light")
 		_ = os.MkdirAll(dir, 0o755)
 	}
 	return dir
 }
 
-// readAndroidStagingMarker reads the staging path marker written by Java's
-// WailsBridge.writeStagingMarker() during app initialization. Returns empty
-// string if unavailable.
-func readAndroidStagingMarker() string {
-	// The marker is at <filesDir>/.light/staging_path. We don't know filesDir
-	// upfront, so scan known Android data roots.
-	roots := []string{
-		os.Getenv("ANDROID_DATA"), // typically "/data"
-		"/data/data",
-		"/data/user/0",
+// androidInternalDir returns a writable config directory on Android by trying
+// known app-internal storage paths and verifying write access.
+func androidInternalDir() string {
+	// Android app internal storage: /data/data/<pkg>/files or /data/user/0/<pkg>/files
+	// We try known package names and both data roots.
+	packages := []string{"com.wails.app", "com.wails.app.light", "com.wails.app.debug"}
+	roots := []string{"/data/data", "/data/user/0"}
+	// Also try ANDROID_DATA env if set
+	if ad := os.Getenv("ANDROID_DATA"); ad != "" && ad != "/" {
+		roots = append(roots, ad)
 	}
+
 	for _, root := range roots {
-		if root == "" || root == "/" {
-			continue
-		}
-		// Try common package names
-		for _, pkg := range []string{"com.wails.app", "com.wails.app.light"} {
-			marker := filepath.Join(root, pkg, "files", ".light", "staging_path")
-			if data, err := os.ReadFile(marker); err == nil {
-				p := strings.TrimSpace(string(data))
-				if p != "" {
-					return p
-				}
+		for _, pkg := range packages {
+			filesDir := filepath.Join(root, pkg, "files")
+			dir := filepath.Join(filesDir, ".light")
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+				continue
+			}
+			// Verify we can actually write here
+			test := filepath.Join(dir, ".write_test")
+			if f, err := os.Create(test); err == nil {
+				f.Close()
+				os.Remove(test)
+				return dir
 			}
 		}
 	}

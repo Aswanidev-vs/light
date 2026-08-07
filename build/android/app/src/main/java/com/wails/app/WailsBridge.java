@@ -132,37 +132,11 @@ public class WailsBridge {
             return;
         }
         try {
-            // Write the staging marker BEFORE nativeInit: Go's configDir() runs
-            // during nativeInit and needs the marker to exist at that point.
-            writeStagingMarker();
             nativeInit(this);
             initialized = true;
             Log.i(TAG, "Wails bridge initialized");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize Wails bridge", e);
-        }
-    }
-
-    /**
-     * Write the app's internal files directory path to a well-known marker file
-     * that Go reads during configDir(). This is the ONLY directory on Android
-     * that is guaranteed writable by the app process under scoped storage.
-     */
-    private void writeStagingMarker() {
-        try {
-            java.io.File filesDir = activity.getFilesDir();
-            if (filesDir == null) return;
-            String path = filesDir.getAbsolutePath();
-            // Create the .light subdirectory and write the staging path inside it
-            java.io.File lightDir = new java.io.File(path, ".light");
-            lightDir.mkdirs();
-            java.io.File marker = new java.io.File(lightDir, "staging_path");
-            java.io.FileWriter fw = new java.io.FileWriter(marker);
-            fw.write(path);
-            fw.close();
-            if (DEBUG) Log.d(TAG, "Staging marker written: " + path);
-        } catch (Exception e) {
-            Log.e(TAG, "writeStagingMarker failed", e);
         }
     }
 
