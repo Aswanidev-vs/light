@@ -116,6 +116,23 @@ public class WailsJSBridge {
     }
 
     /**
+     * Launch the Android folder picker using SAF (Storage Access Framework).
+     * Called from JavaScript: wails.pickFolder(callbackId)
+     * The result is sent back via callback with the selected folder path.
+     */
+    @JavascriptInterface
+    public void pickFolder(final String callbackId) {
+        if (DEBUG) Log.d(TAG, "pickFolder called");
+        webView.post(() -> {
+            if (webView.getContext() instanceof MainActivity) {
+                ((MainActivity) webView.getContext()).launchFolderPicker(callbackId);
+            } else {
+                sendCallback(callbackId, null, "Activity not available");
+            }
+        });
+    }
+
+    /**
      * Send a callback response to JavaScript
      */
     private void sendCallback(String callbackId, String result, String error) {
