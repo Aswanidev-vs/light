@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -17,6 +19,19 @@ const (
 )
 
 func configDir() string {
+	// On Android, os.UserHomeDir() and os.Getwd() return non-writable paths
+	// (often "/" or "."), so raw filesystem writes fail. Java writes the app's
+	// internal files directory to a marker file during bridge init — read it
+	// first for a guaranteed-writable staging path.
+	if runtime.GOOS == "android" {
+		if marker := readAndroidStagingMarker(); marker != "" {
+			dir := filepath.Join(marker, ".light")
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+				return dir
+			}
+		}
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" || home == "." {
 		// On Android, os.UserHomeDir() may fail or return "." (root), which is
@@ -35,6 +50,35 @@ func configDir() string {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 	return dir
+}
+
+// readAndroidStagingMarker reads the staging path marker written by Java's
+// WailsBridge.writeStagingMarker() during app initialization. Returns empty
+// string if unavailable.
+func readAndroidStagingMarker() string {
+	// The marker is at <filesDir>/.light/staging_path. We don't know filesDir
+	// upfront, so scan known Android data roots.
+	roots := []string{
+		os.Getenv("ANDROID_DATA"), // typically "/data"
+		"/data/data",
+		"/data/user/0",
+	}
+	for _, root := range roots {
+		if root == "" || root == "/" {
+			continue
+		}
+		// Try common package names
+		for _, pkg := range []string{"com.wails.app", "com.wails.app.light"} {
+			marker := filepath.Join(root, pkg, "files", ".light", "staging_path")
+			if data, err := os.ReadFile(marker); err == nil {
+				p := strings.TrimSpace(string(data))
+				if p != "" {
+					return p
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func newID() string {
