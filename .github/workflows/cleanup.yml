@@ -1,0 +1,58 @@
+name: Cleanup Old Artifacts
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  delete-artifacts:
+    name: Delete old artifacts (older than 1 day)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Delete old artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Fetching all artifacts..."
+          gh api --paginate --slurp \
+            "repos/${{ github.repository }}/actions/artifacts?per_page=100" > artifacts.json
+
+          COUNT=$(jq '[.[].artifacts[]?] | length' artifacts.json)
+          echo "Found $COUNT total artifacts"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No artifacts to clean up."
+            exit 0
+          fi
+
+          CUTOFF=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)
+          echo "Deleting artifacts created before: $CUTOFF"
+
+          DELETED=0
+          jq -r --arg cutoff "$CUTOFF" \
+            '.[].artifacts[]? | select(.created_at < $cutoff) | [.id, .name, .created_at] | @tsv' artifacts.json |
+          while IFS=$'\t' read -r ID NAME CREATED; do
+            [ -z "${ID:-}" ] && continue
+            echo "Deleting: $NAME (created: $CREATED, id: $ID)"
+            gh api --method DELETE repos/${{ github.repository }}/actions/artifacts/$ID && DELETED=$((DELETED + 1)) || echo "Failed to delete $ID"
+          done
+
+          REMAINING=$(gh api --paginate --slurp \
+            "repos/${{ github.repository }}/actions/artifacts?per_page=100" |
+            jq '[.[].artifacts[]?] | length')
+          echo "Done. Deleted artifacts older than 1 day. Remaining: $REMAINING"
+
+      - name: Trigger build workflow (manual only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Triggering build workflow..."
+          gh workflow run build.yml --ref "${GITHUB_REF_NAME:-main}" || echo "Note: Could not auto-trigger build."

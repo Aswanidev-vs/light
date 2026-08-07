@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Camera captures are written here and shared with the camera app via the
+         FileProvider. -->
+    <cache-path name="captures" path="captures/" />
+    <!-- File picker copies are written here and shared with Go via the bridge. -->
+    <cache-path name="wails-picker" path="wails-picker/" />
+</paths>

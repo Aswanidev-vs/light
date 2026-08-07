@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-family: 'Inter', system-ui, sans-serif;
+    background: #0a0c09;
+    color: #edede8;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid theme('colors.accent.DEFAULT');
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Wails draggable region — apply to headers only. */
+  .drag-region {
+    --wails-draggable: drag;
+  }
+
+  .glass {
+    background: rgba(23, 26, 21, 0.86);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.16);
+    backdrop-filter: blur(16px);
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition no-drag;
+  }
+  .btn-accent {
+    @apply btn bg-accent text-ink shadow-[0_8px_20px_rgba(240,165,0,0.16)] hover:brightness-110;
+  }
+  .btn-ghost {
+    @apply btn text-content-muted hover:text-content hover:bg-white/5;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-content-muted transition no-drag hover:text-content hover:bg-white/5;
+  }
+  .nav-item--active {
+    @apply bg-accent-soft text-accent;
+  }
+  .nav-item-mobile {
+    @apply flex flex-1 flex-col items-center gap-1 py-2 text-content-faint no-drag;
+  }
+  .nav-item-mobile--active {
+    @apply text-accent;
+  }
+
+  .card {
+    @apply rounded-xl border border-white/5 bg-surface-1 shadow-[0_12px_32px_rgba(0,0,0,0.12)];
+  }
+
+  .page {
+    @apply flex h-full flex-col overflow-auto p-5 md:p-8;
+  }
+
+  .page-header {
+    @apply mb-6 flex items-end justify-between gap-4;
+  }
+
+  .page-kicker {
+    @apply mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent;
+  }
+
+  .page-title {
+    @apply text-2xl font-semibold tracking-[-0.03em] text-content md:text-3xl;
+  }
+
+  .field-label {
+    @apply mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-content-muted;
+  }
+
+  .field-input {
+    @apply w-full rounded-lg border border-white/10 bg-surface-0 px-3.5 py-3 text-sm text-content outline-none transition placeholder:text-content-faint focus:border-accent/70 focus:ring-2 focus:ring-accent/10;
+  }
+
+  .toggle {
+    @apply relative h-7 w-12 shrink-0 rounded-full bg-surface-3 p-0.5 transition-colors;
+  }
+
+  .toggle--on {
+    @apply bg-accent;
+  }
+
+  .toggle-thumb {
+    @apply absolute left-0.5 top-0.5 h-6 w-6 rounded-full bg-white shadow-[0_2px_5px_rgba(0,0,0,0.28)] transition-transform;
+  }
+
+  .toggle-thumb--on {
+    @apply translate-x-5;
+  }
+}
+
+@layer utilities {
+  .no-drag {
+    --wails-draggable: no-drag;
+  }
+}
+
+/* thin scrollbars */
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}

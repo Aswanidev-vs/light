@@ -1,0 +1,92 @@
+<script setup lang="ts">
+import { ref, watchEffect } from 'vue'
+import { useSettings } from '../composables/useSettings'
+import { SettingsService } from '../../bindings/light/internal/light'
+import { useUI } from '../composables/useUI'
+import Icon from '../components/common/Icon.vue'
+
+const { settings } = useSettings()
+const { toast } = useUI()
+
+const local = ref({ ...settings.value })
+watchEffect(() => {
+  local.value = { ...settings.value }
+})
+
+async function save() {
+  try {
+    await SettingsService.UpdateSettings(local.value)
+    toast('Settings saved', 'success')
+  } catch {
+    toast('Failed to save settings', 'error')
+  }
+}
+
+function reset() {
+  local.value.downloadDir = settings.value.downloadDir
+}
+</script>
+
+<template>
+  <div class="page">
+    <div class="page-header"><div><div class="page-kicker">Preferences</div><h1 class="page-title">Settings</h1></div></div>
+
+    <div class="card flex max-w-2xl flex-col gap-6 p-5 md:p-6">
+      <!-- Device name -->
+      <div>
+        <label class="field-label">Device name</label>
+        <input
+          v-model="local.deviceName"
+          class="field-input"
+        />
+      </div>
+
+      <!-- Download directory -->
+      <div>
+        <label class="field-label">Download folder</label>
+        <div class="flex gap-2">
+          <input
+            v-model="local.downloadDir"
+            class="field-input font-mono"
+          />
+          <button class="btn-ghost border border-white/10" @click="reset">Reset</button>
+        </div>
+      </div>
+
+      <!-- Port -->
+      <div>
+        <label class="field-label">Port</label>
+        <input
+          v-model.number="local.port"
+          type="number"
+          min="1"
+          max="65535"
+          class="field-input w-32"
+        />
+      </div>
+
+      <!-- Auto accept -->
+      <div class="flex items-center justify-between rounded-lg border border-white/5 bg-surface-0 px-4 py-4">
+        <div>
+          <div class="text-sm font-medium">Auto-accept files</div>
+          <div class="text-xs text-content-faint">Incoming files will be accepted automatically</div>
+        </div>
+        <button
+          class="toggle"
+          :class="local.autoAccept ? 'toggle--on' : ''"
+          :aria-pressed="local.autoAccept"
+          aria-label="Toggle auto-accept files"
+          @click="local.autoAccept = !local.autoAccept"
+        >
+          <span
+            class="toggle-thumb"
+            :class="local.autoAccept ? 'toggle-thumb--on' : ''"
+          />
+        </button>
+      </div>
+
+      <!-- Save -->
+      <button class="btn-accent self-start" @click="save">Save settings</button>
+    </div>
+  </div>
+</template>

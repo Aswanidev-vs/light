@@ -1,0 +1,383 @@
+name: Build Light (Windows + Android)
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # Required so the cleanup-artifacts job can actually delete old artifacts;
+  # without it the delete-artifact action silently fails (failOnError: false)
+  # and storage accumulates until the 500MB quota is hit.
+  actions: write
+
+env:
+  GO_VERSION: '1.25'
+  NODE_VERSION: '22'
+  JAVA_VERSION: '17'
+
+jobs:
+  cleanup-artifacts:
+    name: Clean old artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Delete artifacts from previous runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # This repository's release files are copied to GitHub Releases, so
+          # workflow artifacts are only temporary build transport. Delete all
+          # existing repository artifacts before creating the new ones. This
+          # also removes artifacts created by older versions of this workflow
+          # whose names did not use the current prefixes.
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" |
+            jq -r '.[].artifacts[]?.id' |
+          while read -r id; do
+            [ -z "$id" ] && continue
+            echo "Deleting artifact: $id"
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+          done
+
+  build-windows:
+    name: Build Windows (exe + installer)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    needs: [cleanup-artifacts]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        # Keep cgo disabled for the Windows CLI build. Persisting it with
+        # `go env -w` avoids shell/toolchain environment mismatches on runners.
+        run: |
+          go env -w CGO_ENABLED=0
+          go env CGO_ENABLED
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.2
+        shell: pwsh
+
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+          cd ..
+
+      - name: Generate Wails bindings (Windows)
+        run: wails3 generate bindings -f "-tags=windows" -clean=true -ts
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+
+      - name: Build Windows binary
+        run: wails3 task windows:build
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+        shell: bash
+
+      - name: Package Windows installer (Inno Setup)
+        working-directory: build/windows
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+        shell: bash
+
+      - name: Find Windows artifacts
+        id: find-win
+        shell: bash
+        run: |
+          echo "=== Files in bin/ ==="
+          find bin -type f 2>/dev/null || echo "bin/ directory not found"
+
+          # Find the exe
+          EXE=$(find bin -name "light.exe" -type f 2>/dev/null | head -1 || true)
+
+          # Find the installer
+          INSTALLER=$(find bin -name "light-installer.exe" -type f 2>/dev/null | head -1 || true)
+
+          if [ -z "$EXE" ]; then
+            echo "ERROR: Windows exe not found"
+            exit 1
+          fi
+
+          echo "exe_path=$EXE" >> $GITHUB_OUTPUT
+          if [ -n "$INSTALLER" ]; then echo "installer_path=$INSTALLER" >> $GITHUB_OUTPUT; fi
+          echo "EXE: $EXE"
+          echo "INSTALLER: ${INSTALLER:-none}"
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Upload Windows artifact
+        # PR builds are for CI feedback only; artifacts from every PR commit
+        # are what exhausted the storage quota. Keep uploads to push/dispatch/
+        # tag runs, and only keep dev builds for 1 day (tags: 14 days).
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-windows-${{ steps.version.outputs.version }}
+          path: ${{ steps.find-win.outputs.exe_path }}
+          if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && '14' || '1' }}
+
+      - name: Upload Windows installer
+        if: github.event_name != 'pull_request' && steps.find-win.outputs.installer_path
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-installer-${{ steps.version.outputs.version }}
+          path: ${{ steps.find-win.outputs.installer_path }}
+          if-no-files-found: ignore
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && '14' || '1' }}
+
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    needs: [cleanup-artifacts]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-33 build-tools;33.0.0 ndk;26.3.11579264
+
+      - name: Export Android SDK/NDK env
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> $GITHUB_ENV
+
+      - name: Persist CGO and NDK variables for Android builds
+        run: |
+          # These must persist to GITHUB_ENV so the later wails3 task
+          # android:package:fat (which builds Go with cgo) can find the
+          # NDK sysroot headers (e.g. android/log.h). Exporting them only
+          # inside the bindings step's subshell is not enough.
+          echo "CGO_ENABLED=1" >> $GITHUB_ENV
+          echo "CGO_CFLAGS=-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" >> $GITHUB_ENV
+          echo "CGO_LDFLAGS=-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib" >> $GITHUB_ENV
+          echo "CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang" >> $GITHUB_ENV
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.2
+
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+          cd ..
+
+      - name: Generate Android bindings
+        run: |
+          cd frontend
+          # Enable CGO and point to the NDK sysroot headers/libs so C headers
+          # like android/log.h can be found during binding generation.
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+          export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+          export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
+          GOOS=android GOARCH=arm64 wails3 generate bindings -f "-tags=android" -clean=true -ts
+          cd ..
+
+      - name: Generate Android overlay
+        run: wails3 android overlay:gen -out build/android/overlay.json -config build/config.yml
+
+      - name: Verify Android NDK setup
+        run: |
+          echo "=== ANDROID_HOME ==="
+          echo "$ANDROID_HOME"
+          echo "=== ANDROID_NDK_HOME ==="
+          echo "$ANDROID_NDK_HOME"
+          NDK_ROOT="$ANDROID_NDK_HOME"
+          if [ -z "$NDK_ROOT" ]; then
+            SDK_ROOT="$ANDROID_HOME"
+            NDK_ROOT=$(ls -d "$SDK_ROOT"/ndk/* 2>/dev/null | sort -V | tail -1)
+          fi
+          echo "=== Resolved NDK_ROOT: $NDK_ROOT ==="
+          if [ -n "$NDK_ROOT" ] && [ -d "$NDK_ROOT" ]; then
+            echo "=== Available clang compilers ==="
+            find "$NDK_ROOT/toolchains/llvm/prebuilt" -name "*-clang" 2>/dev/null | sort
+            echo "=== Host tag (uname -m) ==="
+            uname -m
+          else
+            echo "ERROR: NDK not found at $NDK_ROOT"
+          fi
+        shell: bash
+
+      - name: Verify CC (debug)
+        run: |
+          echo "CC=$CC"
+          echo "GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED"
+          if command -v "$CC" >/dev/null 2>&1; then
+            "$CC" --version || true
+          else
+            echo "CC not found in PATH"
+          fi
+
+      - name: Build Android APK (fat)
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: 1
+          CC: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang
+          CGO_CFLAGS: -I${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
+          CGO_LDFLAGS: -L${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib
+        run: wails3 task android:package:fat
+
+
+      - name: Find APK files
+        id: find-apk
+        run: |
+          echo "=== Generated APK files ==="
+          ls -la bin/*.apk 2>/dev/null || find . -name "*.apk" -type f
+
+          if [ ! -f "bin/light.apk" ]; then
+            echo "ERROR: light.apk not found"
+            exit 1
+          fi
+
+      - name: Get version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Upload APK artifacts
+        # PR builds are for CI feedback only; see the Windows upload step.
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-android-${{ steps.version.outputs.version }}
+          path: bin/*.apk
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && '14' || '1' }}
+
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded files
+        run: |
+          echo "=== All downloaded files ==="
+          find artifacts -type f 2>/dev/null || echo "No files found"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          echo "Creating release for tag: $TAG_NAME"
+
+          # Find all release files
+          RELEASE_FILES=$(find artifacts -type f \( -name "*.exe" -o -name "*.apk" \) 2>/dev/null | tr '\n' ' ')
+
+          echo "Release files: $RELEASE_FILES"
+
+          if [ -z "$RELEASE_FILES" ]; then
+            echo "WARNING: No release files found"
+            gh release create "$TAG_NAME" \
+              --title "Light $TAG_NAME" \
+              --generate-notes
+          else
+            gh release create "$TAG_NAME" \
+              --title "Light $TAG_NAME" \
+              --generate-notes \
+              $RELEASE_FILES
+          fi
+
+      - name: Delete old draft releases
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Clean up any draft releases
+          gh release list --state draft | awk '{print $1}' | xargs -r gh release delete --yes || true

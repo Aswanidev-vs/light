@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Light transfers files over plain HTTP to arbitrary LAN IPs
+         (e.g. 192.168.1.x:9121).  The previous config only permitted
+         cleartext for localhost/10.0.2.2/wails.localhost, which caused
+         every cross-device fetch() / XHR to be blocked by Android's
+         network security policy.  Allowing cleartext for all hosts is
+         safe because the traffic is local-network file data, not
+         sensitive remote-server communication. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>
