@@ -78,6 +78,8 @@ jobs:
           go env CGO_ENABLED
           go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.2
         shell: pwsh
+        env:
+          CGO_ENABLED: "0"
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
