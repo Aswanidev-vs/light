@@ -25,6 +25,23 @@ async function save() {
 function reset() {
   local.value.downloadDir = settings.value.downloadDir
 }
+
+async function pickFolder() {
+  try {
+    const { Dialogs } = await import('@wailsio/runtime')
+    const result = await Dialogs.OpenFile({
+      Title: 'Select download folder',
+      Directory: local.value.downloadDir,
+      CanChooseDirectories: true,
+      CanChooseFiles: false,
+    })
+    if (result) {
+      local.value.downloadDir = result
+    }
+  } catch {
+    // Dialog not available on this platform (e.g. Android) — ignore silently
+  }
+}
 </script>
 
 <template>
@@ -47,8 +64,9 @@ function reset() {
         <div class="flex gap-2">
           <input
             v-model="local.downloadDir"
-            class="field-input font-mono"
+            class="field-input flex-1 font-mono"
           />
+          <button class="btn-ghost border border-white/10" @click="pickFolder">Browse</button>
           <button class="btn-ghost border border-white/10" @click="reset">Reset</button>
         </div>
       </div>
