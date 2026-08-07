@@ -211,16 +211,15 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> $GITHUB_ENV
 
-      - name: Persist CGO and NDK variables for Android builds
+      - name: Persist CGO/NDK flags (but avoid persisting CC)
         run: |
-          # These must persist to GITHUB_ENV so the later wails3 task
-          # android:package:fat (which builds Go with cgo) can find the
-          # NDK sysroot headers (e.g. android/log.h). Exporting them only
-          # inside the bindings step's subshell is not enough.
+          # Persist CGO flags so binding generation and cross builds can find
+          # NDK headers/libs. Do not persist CC: the Android cross-compiler
+          # would break host builds (such as go install) by forcing an
+          # aarch64 compiler onto x86_64 assembly.
           echo "CGO_ENABLED=1" >> $GITHUB_ENV
           echo "CGO_CFLAGS=-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" >> $GITHUB_ENV
           echo "CGO_LDFLAGS=-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib" >> $GITHUB_ENV
-          echo "CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang" >> $GITHUB_ENV
 
       - name: Install Linux dependencies
         run: |
