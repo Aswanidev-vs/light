@@ -276,11 +276,17 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 func (s *FileTransferService) receiveDir() string {
 	if PlatformDeviceType() == DeviceTypeMobile {
 		dir := filepath.Join(configDir(), "downloads")
-		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
-			// Fallback: try a temp dir — at least the transfer won't 500.
-			dir = filepath.Join(os.TempDir(), "light-downloads")
-			_ = os.MkdirAll(dir, 0o755)
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+			return dir
 		}
+		// Fallback 1: temp dir
+		dir = filepath.Join(os.TempDir(), "light-downloads")
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+			return dir
+		}
+		// Fallback 2: current working directory
+		dir = filepath.Join(".", "light-downloads")
+		_ = os.MkdirAll(dir, 0o755)
 		return dir
 	}
 	return s.settings.GetSettings().DownloadDir
@@ -423,10 +429,11 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 		return err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		s.failTransfer(subID, fname, fmt.Sprintf("receiver error %d", resp.StatusCode))
-		return fmt.Errorf("receiver error %d", resp.StatusCode)
+		errMsg := fmt.Sprintf("receiver error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		s.failTransfer(subID, fname, errMsg)
+		return fmt.Errorf(errMsg)
 	}
 
 	s.manager.Complete(subID, "", sum)
