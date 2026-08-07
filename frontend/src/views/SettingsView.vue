@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watchEffect } from 'vue'
+import { ref, watchEffect, onUnmounted } from 'vue'
 import { useSettings } from '../composables/useSettings'
 import { SettingsService } from '../../bindings/light/internal/light'
 import { useUI } from '../composables/useUI'
+import { Events } from '@wailsio/runtime'
 import Icon from '../components/common/Icon.vue'
 
 const { settings } = useSettings()
@@ -26,7 +27,43 @@ function reset() {
   local.value.downloadDir = settings.value.downloadDir
 }
 
+let folderPickerCleanup: (() => void) | null = null
+
 async function pickFolder() {
+  // On Android, use the native SAF folder picker via the JS bridge
+  if (typeof window !== 'undefined' && (window as any).wails?.platform?.() === 'android') {
+    return new Promise<void>((resolve) => {
+      // Clean up any previous listener
+      if (folderPickerCleanup) {
+        folderPickerCleanup()
+        folderPickerCleanup = null
+      }
+
+      const unsub = Events.On('android:folderPicked', (e: any) => {
+        const data = e && typeof e === 'object' && 'data' in e ? e.data : e
+        if (data?.path) {
+          local.value.downloadDir = data.path
+        }
+        if (data?.error) {
+          toast('Failed to pick folder', 'error')
+        }
+        // Clean up after receiving result
+        if (folderPickerCleanup) {
+          folderPickerCleanup()
+          folderPickerCleanup = null
+        }
+        resolve()
+      })
+
+      folderPickerCleanup = unsub as () => void
+
+      // Launch the native picker
+      const callbackId = 'folder_' + Date.now()
+      ;(window as any).wails.pickFolder(callbackId)
+    })
+  }
+
+  // On desktop, use the Wails dialog
   try {
     const { Dialogs } = await import('@wailsio/runtime')
     const result = await Dialogs.OpenFile({
@@ -39,9 +76,15 @@ async function pickFolder() {
       local.value.downloadDir = result
     }
   } catch {
-    // Dialog not available on this platform (e.g. Android) — ignore silently
+    // Dialog not available — ignore silently
   }
 }
+
+onUnmounted(() => {
+  if (folderPickerCleanup) {
+    folderPickerCleanup()
+  }
+})
 </script>
 
 <template>

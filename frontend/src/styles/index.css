@@ -58,7 +58,7 @@
     @apply bg-accent-soft text-accent;
   }
   .nav-item-mobile {
-    @apply flex flex-1 flex-col items-center gap-1 py-2 text-content-faint no-drag;
+    @apply flex flex-1 flex-col items-center justify-center gap-1 py-2.5 text-content-faint no-drag transition-colors;
   }
   .nav-item-mobile--active {
     @apply text-accent;
@@ -69,7 +69,7 @@
   }
 
   .page {
-    @apply flex h-full flex-col overflow-auto p-5 md:p-8;
+    @apply flex h-full flex-col overflow-auto p-4 sm:p-5 md:p-8;
   }
 
   .page-header {

@@ -59,7 +59,7 @@ const nav = [
     </main>
 
     <!-- Mobile bottom nav -->
-    <nav class="flex border-t border-white/5 bg-surface-0 md:hidden">
+    <nav class="flex border-t border-white/5 bg-surface-0 pb-[env(safe-area-inset-bottom)] md:hidden">
       <RouterLink
         v-for="n in nav"
         :key="n.to"
@@ -67,7 +67,7 @@ const nav = [
         class="nav-item-mobile"
         active-class="nav-item-mobile--active"
       >
-        <Icon :name="n.icon" :size="22" />
+        <Icon :name="n.icon" :size="24" />
       </RouterLink>
     </nav>
   </div>

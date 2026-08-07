@@ -59,6 +59,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String WAILS_HOST = "wails.localhost";
     private static final int FILE_PICKER_REQUEST = 7001;
     private static final int WEB_FILE_PICKER_REQUEST = 7004;
+    private static final int FOLDER_PICKER_REQUEST = 7005;
 
     private WebView webView;
     private WailsBridge bridge;
@@ -71,6 +72,7 @@ public class MainActivity extends AppCompatActivity {
 
     // The Go-side dialog ID of the in-flight file picker (-1 when idle)
     private int pendingFilePickerCallbackID = -1;
+    private int pendingFolderPickerCallbackID = -1;
     private ValueCallback<Uri[]> pendingWebFileCallback;
     private PermissionRequest pendingWebPermissionRequest;
     private static final int PHOTO_CAPTURE_REQUEST = 7002;
@@ -375,6 +377,42 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
+    /**
+     * Handle the result from the folder picker (SAF).
+     * Converts the tree URI to a readable path and emits it to JavaScript.
+     */
+    private void handleFolderPickerResult(int resultCode, @Nullable Intent data) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            bridge.emitEvent("android:folderPicked", "{\"cancelled\":true}");
+            return;
+        }
+
+        Uri treeUri = data.getData();
+        try {
+            // Take persistable permission so we can access the folder later
+            getContentResolver().takePersistableUriPermission(treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            // Extract the path from the tree URI
+            String path = treeUri.getPath();
+            if (path != null) {
+                // Tree URIs look like: /primary:Download/Light
+                // Convert to standard path
+                if (path.startsWith("/primary:")) {
+                    path = "/sdcard/" + path.substring("/primary:".length());
+                }
+            } else {
+                path = treeUri.toString();
+            }
+
+            bridge.emitEvent("android:folderPicked",
+                    "{\"path\":\"" + path.replace("\"", "\\\"") + "\"}");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to handle folder picker result", e);
+            bridge.emitEvent("android:folderPicked", "{\"error\":\"" + e.getMessage() + "\"}");
+        }
+    }
+
     /** Downscale a captured photo into a base64 JPEG data URL for display in the webview. */
     @Nullable
     private String makePhotoThumbnail(File file) {
@@ -525,6 +563,23 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * Launch the Android folder picker using SAF (Storage Access Framework).
+     * The selected folder path is returned to JavaScript via the callback.
+     */
+    public void launchFolderPicker(String callbackID) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            pendingFolderPickerCallbackID = callbackID.hashCode();
+            startActivityForResult(intent, FOLDER_PICKER_REQUEST);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to launch folder picker", e);
+            bridge.emitEvent("android:folderPicked", "{\"error\":\"" + e.getMessage() + "\",\"callbackId\":\"" + callbackID + "\"}");
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -549,6 +604,10 @@ public class MainActivity extends AppCompatActivity {
         }
         if (requestCode == PHOTO_CAPTURE_REQUEST || requestCode == VIDEO_CAPTURE_REQUEST) {
             handleCaptureResult(resultCode, data);
+            return;
+        }
+        if (requestCode == FOLDER_PICKER_REQUEST) {
+            handleFolderPickerResult(resultCode, data);
             return;
         }
         if (requestCode != FILE_PICKER_REQUEST) {
