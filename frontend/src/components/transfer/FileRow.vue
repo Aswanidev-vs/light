@@ -31,10 +31,10 @@ const statusLabel: Record<string, string> = {
         <span class="truncate font-medium">{{ transfer.filename }}</span>
         <span class="shrink-0 text-xs text-content-faint">{{ statusLabel[transfer.status] || transfer.status }}</span>
       </div>
-      <div class="mt-1 flex items-center gap-3 text-xs text-content-faint">
+      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-content-faint">
         <span class="font-mono">{{ formatBytes(transfer.transferred) }} / {{ formatBytes(transfer.size) }}</span>
         <span v-if="transfer.status === 'active'">{{ formatSpeed(transfer.speed) }}</span>
-        <span v-if="transfer.status === 'failed'" class="text-danger">{{ transfer.error }}</span>
+        <span v-if="transfer.status === 'failed'" class="w-full break-words text-danger">{{ transfer.error }}</span>
       </div>
       <div class="mt-2">
         <ProgressBar :percent="transfer.percent" :active="transfer.status === 'active'" :failed="transfer.status === 'failed'" />
