@@ -192,7 +192,10 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	}
 
 	dl := s.receiveDir()
-	_ = os.MkdirAll(dl, 0o755)
+	if mkErr := os.MkdirAll(dl, 0o755); mkErr != nil {
+		http.Error(w, "cannot create destination dir: "+mkErr.Error(), 500)
+		return
+	}
 	path := uniquePath(filepath.Join(dl, sanitize(fname)))
 	// Record the real destination the user chose. On mobile the file is first
 	// written to an app-internal staging dir (SAF folders aren't raw-writable
@@ -201,7 +204,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	dest := s.settings.GetSettings().DownloadDir
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		http.Error(w, "cannot open destination", 500)
+		http.Error(w, "cannot open destination ("+dl+"): "+err.Error(), 500)
 		return
 	}
 	defer f.Close()
@@ -273,7 +276,11 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 func (s *FileTransferService) receiveDir() string {
 	if PlatformDeviceType() == DeviceTypeMobile {
 		dir := filepath.Join(configDir(), "downloads")
-		_ = os.MkdirAll(dir, 0o755)
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			// Fallback: try a temp dir — at least the transfer won't 500.
+			dir = filepath.Join(os.TempDir(), "light-downloads")
+			_ = os.MkdirAll(dir, 0o755)
+		}
 		return dir
 	}
 	return s.settings.GetSettings().DownloadDir
