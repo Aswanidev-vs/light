@@ -91,6 +91,12 @@ jobs:
           npm ci
           cd ..
 
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm run build
+          cd ..
+
       - name: Generate Wails bindings (Windows)
         run: wails3 generate bindings -f "-tags=windows" -clean=true -ts
         shell: bash
