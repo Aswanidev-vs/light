@@ -18,11 +18,22 @@ const (
 
 func configDir() string {
 	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
+	if err != nil || home == "" || home == "." {
+		// On Android, os.UserHomeDir() may fail or return "." (root), which is
+		// not writable. Fall back to the working directory — on Android, the Go
+		// library runs in the app process where CWD is the data directory.
+		if cwd, cwdErr := os.Getwd(); cwdErr == nil && cwd != "" && cwd != "/" {
+			home = cwd
+		} else {
+			home = "."
+		}
 	}
 	dir := filepath.Join(home, ".light")
-	_ = os.MkdirAll(dir, 0o755)
+	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+		// Last resort: try the OS temp directory.
+		dir = filepath.Join(os.TempDir(), ".light")
+		_ = os.MkdirAll(dir, 0o755)
+	}
 	return dir
 }
 
