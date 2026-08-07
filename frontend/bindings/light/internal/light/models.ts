@@ -113,6 +113,7 @@ export class Settings {
     "deviceName": string;
     "port": number;
     "downloadDir": string;
+    "downloadDirUri": string;
     "autoAccept": boolean;
     "theme": string;
     "enableEncryption": boolean;
@@ -127,6 +128,9 @@ export class Settings {
         }
         if (!("downloadDir" in $$source)) {
             this["downloadDir"] = "";
+        }
+        if (!("downloadDirUri" in $$source)) {
+            this["downloadDirUri"] = "";
         }
         if (!("autoAccept" in $$source)) {
             this["autoAccept"] = false;

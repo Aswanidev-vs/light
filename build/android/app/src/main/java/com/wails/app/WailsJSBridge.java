@@ -133,6 +133,24 @@ public class WailsJSBridge {
     }
 
     /**
+     * Copy a finished download (staged in app-internal storage by Go) into the
+     * SAF folder the user picked. Called from JavaScript:
+     * wails.copyToFolder(JSON.stringify({uri, fileName, sourcePath}))
+     * The outcome is delivered as the "android:copyDone" event.
+     */
+    @JavascriptInterface
+    public void copyToFolder(final String json) {
+        if (DEBUG) Log.d(TAG, "copyToFolder called");
+        webView.post(() -> {
+            if (webView.getContext() instanceof MainActivity) {
+                ((MainActivity) webView.getContext()).copyToFolder(json);
+            } else {
+                bridge.emitEvent("android:copyDone", "{\"ok\":false,\"error\":\"Activity not available\"}");
+            }
+        });
+    }
+
+    /**
      * Send a callback response to JavaScript
      */
     private void sendCallback(String callbackId, String result, String error) {

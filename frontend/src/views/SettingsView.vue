@@ -44,6 +44,11 @@ async function pickFolder() {
         if (data?.path) {
           local.value.downloadDir = data.path
         }
+        // Persist the SAF tree URI so finished downloads can be copied into
+        // this folder (raw-path writes to shared storage are blocked).
+        if (data?.uri) {
+          local.value.downloadDirUri = data.uri
+        }
         if (data?.error) {
           toast('Failed to pick folder', 'error')
         }

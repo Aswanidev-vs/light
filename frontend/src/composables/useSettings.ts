@@ -7,6 +7,7 @@ const settings = ref<Settings>({
   deviceName: '',
   port: 9120,
   downloadDir: '',
+  downloadDirUri: '',
   autoAccept: false,
   theme: 'dark',
   enableEncryption: false,
