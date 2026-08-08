@@ -10,10 +10,6 @@ on:
 
 permissions:
   contents: write
-  # Required so the cleanup-artifacts job can actually delete old artifacts;
-  # without it the delete-artifact action silently fails (failOnError: false)
-  # and storage accumulates until the 500MB quota is hit.
-  actions: write
 
 env:
   GO_VERSION: '1.25'
@@ -21,36 +17,10 @@ env:
   JAVA_VERSION: '17'
 
 jobs:
-  cleanup-artifacts:
-    name: Clean old artifacts
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    steps:
-      - name: Delete artifacts from previous runs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # This repository's release files are copied to GitHub Releases, so
-          # workflow artifacts are only temporary build transport. Delete all
-          # existing repository artifacts before creating the new ones. This
-          # also removes artifacts created by older versions of this workflow
-          # whose names did not use the current prefixes.
-          gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" |
-            jq -r '.[].artifacts[]?.id' |
-          while read -r id; do
-            [ -z "$id" ] && continue
-            echo "Deleting artifact: $id"
-            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
-          done
-
   build-windows:
     name: Build Windows (exe + installer)
     runs-on: windows-2022
     timeout-minutes: 30
-    needs: [cleanup-artifacts]
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -123,23 +93,28 @@ jobs:
         run: choco install innosetup -y
         shell: bash
 
-      - name: Package Windows installer (Inno Setup)
-        working-directory: build/windows
-        run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
-        shell: bash
-
       - name: Get version
         id: version
         shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
+            INSTALLER_VERSION="${VERSION#v}"
           else
             VERSION="dev-$(git rev-parse --short HEAD)"
+            # Inno Setup's VersionInfoVersion must remain numeric for dev builds.
+            INSTALLER_VERSION="0.1.0"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "installer_version=$INSTALLER_VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
+          echo "Installer version: $INSTALLER_VERSION"
+
+      - name: Package Windows installer (Inno Setup)
+        working-directory: build/windows
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.installer_version }}" installer.iss
+        shell: bash
 
       - name: Find Windows artifacts
         id: find-win
@@ -160,14 +135,15 @@ jobs:
 
           # Find the installer and rename with version
           INSTALLER=$(find bin -name "light-installer.exe" -type f 2>/dev/null | head -1 || true)
-          VERSIONED_INSTALLER=""
-          if [ -n "$INSTALLER" ]; then
-            VERSIONED_INSTALLER="bin/light-installer-${VERSION}.exe"
-            cp "$INSTALLER" "$VERSIONED_INSTALLER"
+          if [ -z "$INSTALLER" ]; then
+            echo "ERROR: Windows installer not found in bin/"
+            exit 1
           fi
+          VERSIONED_INSTALLER="bin/light-installer-${VERSION}.exe"
+          cp "$INSTALLER" "$VERSIONED_INSTALLER"
 
           echo "exe_path=$VERSIONED_EXE" >> $GITHUB_OUTPUT
-          if [ -n "$VERSIONED_INSTALLER" ]; then echo "installer_path=$VERSIONED_INSTALLER" >> $GITHUB_OUTPUT; fi
+          echo "installer_path=$VERSIONED_INSTALLER" >> $GITHUB_OUTPUT
           echo "EXE: $VERSIONED_EXE"
           echo "INSTALLER: ${VERSIONED_INSTALLER:-none}"
 
@@ -184,20 +160,18 @@ jobs:
           retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && '14' || '1' }}
 
       - name: Upload Windows installer
-        if: github.event_name != 'pull_request' && steps.find-win.outputs.installer_path
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: light-installer-${{ steps.version.outputs.version }}
           path: ${{ steps.find-win.outputs.installer_path }}
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && '14' || '1' }}
 
   build-android:
     name: Build Android APK
     runs-on: ubuntu-22.04
     timeout-minutes: 45
-    needs: [cleanup-artifacts]
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -380,6 +354,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: List downloaded files
         run: |
@@ -393,22 +368,22 @@ jobs:
           TAG_NAME="${GITHUB_REF#refs/tags/}"
           echo "Creating release for tag: $TAG_NAME"
 
-          # Find all release files
-          RELEASE_FILES=$(find artifacts -type f \( -name "*.exe" -o -name "*.apk" \) 2>/dev/null | tr '\n' ' ')
+          WINDOWS_EXE=$(find artifacts -type f -name "light-${TAG_NAME}.exe" -print -quit 2>/dev/null || true)
+          WINDOWS_INSTALLER=$(find artifacts -type f -name "light-installer-${TAG_NAME}.exe" -print -quit 2>/dev/null || true)
+          ANDROID_APK=$(find artifacts -type f -name "light-${TAG_NAME}.apk" -print -quit 2>/dev/null || true)
 
-          echo "Release files: $RELEASE_FILES"
-
-          if [ -z "$RELEASE_FILES" ]; then
-            echo "WARNING: No release files found"
-            gh release create "$TAG_NAME" \
-              --title "Light $TAG_NAME" \
-              --generate-notes
-          else
-            gh release create "$TAG_NAME" \
-              --title "Light $TAG_NAME" \
-              --generate-notes \
-              $RELEASE_FILES
+          if [ -z "$WINDOWS_EXE" ] || [ -z "$WINDOWS_INSTALLER" ] || [ -z "$ANDROID_APK" ]; then
+            echo "ERROR: release requires Windows exe, Windows installer, and Android APK"
+            echo "Windows exe: ${WINDOWS_EXE:-missing}"
+            echo "Windows installer: ${WINDOWS_INSTALLER:-missing}"
+            echo "Android APK: ${ANDROID_APK:-missing}"
+            exit 1
           fi
+
+          gh release create "$TAG_NAME" \
+            --title "Light $TAG_NAME" \
+            --generate-notes \
+            "$WINDOWS_EXE" "$WINDOWS_INSTALLER" "$ANDROID_APK"
 
       - name: Delete old draft releases
         if: always()
