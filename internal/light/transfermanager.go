@@ -13,7 +13,6 @@ import (
 // SQLite to avoid any CGO/mobile cross-compile risk).
 type TransferManager struct {
 	mu      sync.RWMutex
-	saveMu  sync.Mutex
 	active  map[string]*Transfer
 	history []*Transfer
 }
@@ -36,10 +35,8 @@ func (m *TransferManager) loadHistory() {
 }
 
 func (m *TransferManager) saveHistory() {
-	m.saveMu.Lock()
-	defer m.saveMu.Unlock()
 	m.mu.RLock()
-	h := append([]*Transfer(nil), m.history...)
+	h := m.history
 	m.mu.RUnlock()
 	data, _ := json.MarshalIndent(h, "", "  ")
 	_ = os.WriteFile(filepath.Join(configDir(), "history.json"), data, 0o644)

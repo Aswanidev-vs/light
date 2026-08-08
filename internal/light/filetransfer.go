@@ -21,22 +21,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-const (
-	chunkSize            = 1 << 20 // 1MB
-	maxConcurrentUploads = 4
-)
-
-var fileTransferHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        8,
-		MaxIdleConnsPerHost: 8,
-		IdleConnTimeout:     90 * time.Second,
-		WriteBufferSize:     64 << 10,
-		ReadBufferSize:      64 << 10,
-		DisableCompression:  true,
-	},
-	Timeout: 0,
-}
+const chunkSize = 1 << 20 // 1MB
 
 type acceptState struct {
 	status string // pending | accepted | rejected | cancelled
@@ -196,6 +181,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	fname := r.Header.Get("X-Filename")
 	size := atoi64(r.Header.Get("X-File-Size"))
 	offset := atoi64(r.Header.Get("X-Offset"))
+	checksum := r.Header.Get("X-Checksum-Sha256")
 
 	s.mu.Lock()
 	st := s.accepts[tid]
@@ -223,10 +209,6 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer f.Close()
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(path)
-	}
 	if offset > 0 {
 		_, _ = f.Seek(offset, 0)
 	}
@@ -238,23 +220,11 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	var written int64
 	start := time.Now()
 	lastEmit := start
-	buf := make([]byte, chunkSize)
+	buf := make([]byte, 32*1024)
 	for {
 		n, err := r.Body.Read(buf)
 		if n > 0 {
-			writtenN, writeErr := f.Write(buf[:n])
-			if writeErr != nil {
-				cleanup()
-				s.failTransfer(subID, fname, writeErr.Error())
-				http.Error(w, "write error", 500)
-				return
-			}
-			if writtenN != n {
-				cleanup()
-				s.failTransfer(subID, fname, io.ErrShortWrite.Error())
-				http.Error(w, "write error", 500)
-				return
-			}
+			f.Write(buf[:n])
 			h.Write(buf[:n])
 			written += int64(n)
 			offset += int64(n)
@@ -277,20 +247,19 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 			break
 		}
 		if err != nil {
-			cleanup()
 			s.failTransfer(subID, fname, err.Error())
 			http.Error(w, "read error", 400)
 			return
 		}
 	}
 
-	if err := f.Sync(); err != nil {
-		cleanup()
-		s.failTransfer(subID, fname, "sync error")
-		http.Error(w, "sync error", 500)
+	_ = f.Sync()
+	sum := hex.EncodeToString(h.Sum(nil))
+	if sum != checksum {
+		s.failTransfer(subID, fname, "checksum mismatch")
+		http.Error(w, "checksum mismatch", 400)
 		return
 	}
-	sum := hex.EncodeToString(h.Sum(nil))
 	s.manager.Complete(subID, path, sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
@@ -299,7 +268,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		})
 	}
 	w.WriteHeader(200)
-	w.Write([]byte("ok " + sum))
+	w.Write([]byte("ok"))
 }
 
 // receiveDir returns the directory the receiver writes incoming files to. On
@@ -340,7 +309,11 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		if err != nil {
 			continue
 		}
-		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size()})
+		sum, err := sha256File(p)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size(), Checksum: sum})
 		paths = append(paths, p)
 	}
 	if len(entries) == 0 {
@@ -350,7 +323,7 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 	tid := newID()
 	p := PreparePayload{TransferID: tid, SenderName: s.settings.GetSettings().DeviceName, Files: entries}
 	body, _ := json.Marshal(p)
-	resp, err := fileTransferHTTPClient.Post("http://"+req.DeviceAddr+"/api/prepare", "application/json", bytes.NewReader(body))
+	resp, err := http.Post("http://"+req.DeviceAddr+"/api/prepare", "application/json", bytes.NewReader(body))
 	if err != nil {
 		for _, e := range entries {
 			s.failTransfer(tid+":"+e.Name, e.Name, err.Error())
@@ -376,64 +349,19 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		}
 	}
 
-	type uploadJob struct {
-		path  string
-		entry FileManifestEntry
-	}
-	jobs := make(chan uploadJob)
-	errs := make(chan error, len(paths))
-	nameLocks := make(map[string]*sync.Mutex)
-	var nameLocksMu sync.Mutex
-	getNameLock := func(name string) *sync.Mutex {
-		nameLocksMu.Lock()
-		defer nameLocksMu.Unlock()
-		if lock, ok := nameLocks[name]; ok {
-			return lock
+	for i, p2 := range paths {
+		if err := s.upload(tid, req.DeviceAddr, p2, entries[i].Name, entries[i].Size, entries[i].Checksum); err != nil {
+			return err
 		}
-		lock := &sync.Mutex{}
-		nameLocks[name] = lock
-		return lock
 	}
-
-	workerCount := maxConcurrentUploads
-	if len(paths) < workerCount {
-		workerCount = len(paths)
-	}
-	var workers sync.WaitGroup
-	workers.Add(workerCount)
-	for i := 0; i < workerCount; i++ {
-		go func() {
-			defer workers.Done()
-			for job := range jobs {
-				nameLock := getNameLock(job.entry.Name)
-				nameLock.Lock()
-				err := s.upload(tid, req.DeviceAddr, job.path, job.entry.Name, job.entry.Size)
-				nameLock.Unlock()
-				if err != nil {
-					errs <- fmt.Errorf("%s: %w", job.entry.Name, err)
-				}
-			}
-		}()
-	}
-	for i, path := range paths {
-		jobs <- uploadJob{path: path, entry: entries[i]}
-	}
-	close(jobs)
-	workers.Wait()
-	close(errs)
-
-	var uploadErrors []error
-	for err := range errs {
-		uploadErrors = append(uploadErrors, err)
-	}
-	return errors.Join(uploadErrors...)
+	return nil
 }
 
 func (s *FileTransferService) waitAccept(peerAddr, tid string) bool {
 	deadline := time.Now().Add(2 * time.Minute)
 	url := "http://" + peerAddr + "/api/status/" + tid
 	for time.Now().Before(deadline) {
-		resp, err := fileTransferHTTPClient.Get(url)
+		resp, err := http.Get(url)
 		if err == nil {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -449,7 +377,7 @@ func (s *FileTransferService) waitAccept(peerAddr, tid string) bool {
 	return false
 }
 
-func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size int64) error {
+func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size int64, sum string) error {
 	subID := tid + ":" + fname
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := &sendControl{status: StatusActive, resumeCh: make(chan struct{})}
@@ -477,9 +405,8 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 	}
 	defer f.Close()
 
-	h := sha256.New()
 	cr := &countingReader{
-		r: io.TeeReader(f, h), ctrl: ctrl, subID: subID, fname: fname, size: size,
+		r: f, ctrl: ctrl, subID: subID, fname: fname, size: size,
 		started: time.Now(), lastEmit: time.Now(), app: s.app, manager: s.manager,
 	}
 
@@ -492,9 +419,10 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 	req.Header.Set("X-Filename", fname)
 	req.Header.Set("X-File-Size", strconv.FormatInt(size, 10))
 	req.Header.Set("X-Offset", "0")
+	req.Header.Set("X-Checksum-Sha256", sum)
 	req.ContentLength = size
 
-	resp, err := fileTransferHTTPClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.manager.Cancel(subID)
@@ -505,33 +433,17 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 		return err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		s.failTransfer(subID, fname, err.Error())
-		return err
-	}
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		errMsg := fmt.Sprintf("receiver error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		s.failTransfer(subID, fname, errMsg)
 		return errors.New(errMsg)
 	}
 
-	receivedSum, err := transferResponseChecksum(respBody)
-	if err != nil {
-		s.failTransfer(subID, fname, err.Error())
-		return err
-	}
-	sentSum := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(receivedSum, sentSum) {
-		err = errors.New("checksum mismatch")
-		s.failTransfer(subID, fname, err.Error())
-		return err
-	}
-
-	s.manager.Complete(subID, "", sentSum)
+	s.manager.Complete(subID, "", sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
-			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": sentSum,
+			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": sum,
 		})
 	}
 	return nil
@@ -697,15 +609,17 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func transferResponseChecksum(body []byte) (string, error) {
-	fields := strings.Fields(string(body))
-	if len(fields) != 2 || fields[0] != "ok" || len(fields[1]) != sha256.Size*2 {
-		return "", errors.New("invalid transfer response")
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
-	if _, err := hex.DecodeString(fields[1]); err != nil {
-		return "", errors.New("invalid transfer response")
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
 	}
-	return strings.ToLower(fields[1]), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func atoi64(s string) int64 {
