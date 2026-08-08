@@ -400,24 +400,66 @@ public class MainActivity extends AppCompatActivity {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
 
-            // Extract the path from the tree URI
-            String path = treeUri.getPath();
-            if (path != null) {
-                // Tree URIs look like: /primary:Download/Light
-                // Convert to standard path
-                if (path.startsWith("/primary:")) {
-                    path = "/sdcard/" + path.substring("/primary:".length());
-                }
-            } else {
-                path = treeUri.toString();
-            }
+            String path = folderDisplayPath(treeUri);
 
             bridge.emitEvent("android:folderPicked",
-                    "{\"path\":\"" + path.replace("\"", "\\\"") + "\",\"uri\":\""
-                            + treeUri.toString().replace("\"", "\\\"") + "\"}");
+                    "{\"path\":" + JSONObject.quote(path) + ",\"uri\":"
+                            + JSONObject.quote(treeUri.toString()) + "}");
         } catch (Exception e) {
             Log.e(TAG, "Failed to handle folder picker result", e);
             bridge.emitEvent("android:folderPicked", "{\"error\":\"" + e.getMessage() + "\"}");
+        }
+    }
+
+    /**
+     * Resolve a SAF tree URI to a human-readable folder label. Tree document
+     * IDs such as "msd:1000630592" are provider internals, not filesystem
+     * paths, so they should never be shown in the settings UI.
+     */
+    private String folderDisplayPath(Uri treeUri) {
+        String documentId = DocumentsContract.getTreeDocumentId(treeUri);
+        Uri documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId);
+        Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(
+                    documentUri,
+                    new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                    null,
+                    null,
+                    null);
+            if (cursor != null && cursor.moveToFirst()) {
+                String displayName = cursor.getString(0);
+                if (displayName != null && !displayName.trim().isEmpty()) {
+                    return displayName.trim();
+                }
+            }
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+
+        if (documentId.startsWith("primary:")) {
+            String relativePath = documentId.substring("primary:".length());
+            return relativePath.isEmpty() ? "Internal storage" : relativePath;
+        }
+        return "Selected folder";
+    }
+
+    /**
+     * Return a friendly display label for a previously saved SAF tree URI.
+     * This lets existing installs migrate away from raw "/tree/..." labels.
+     */
+    public String getFolderDisplayName(String uriString) {
+        try {
+            Uri treeUri = Uri.parse(uriString);
+            if (!DocumentsContract.isTreeUri(treeUri)) {
+                return "";
+            }
+            return folderDisplayPath(treeUri);
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to resolve folder display name", e);
+            return "";
         }
     }
 

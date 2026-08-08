@@ -82,7 +82,7 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 		t.Fatalf("stored payload = %q, want %q", stored, payload)
 	}
 	history := manager.GetHistory(1)
-	if len(history) != 1 || history[0].Status != StatusCompleted || history[0].FilePath == "" {
+	if len(history) != 1 || history[0].Status != StatusCompleted || history[0].Size != int64(len(payload)) || history[0].FilePath == "" {
 		t.Fatalf("history = %#v, want one completed transfer with a file path", history)
 	}
 }

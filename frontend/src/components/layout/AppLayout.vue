@@ -21,7 +21,7 @@ const nav = [
     <aside class="hidden w-[76px] shrink-0 flex-col border-r border-white/5 bg-surface-0 md:flex lg:w-64">
       <div class="drag-region flex min-h-20 items-center border-b border-white/5 px-3 lg:px-5">
         <div class="brand-lockup">
-          <span class="brand-mark">L</span>
+          <img src="/logo.png" alt="Light" class="brand-logo" />
           <div class="hidden min-w-0 lg:block">
             <div class="text-sm font-bold tracking-[0.18em] text-content">LIGHT</div>
             <div class="text-[9px] uppercase tracking-[0.16em] text-content-faint">Local transfer</div>
@@ -58,7 +58,7 @@ const nav = [
     <!-- Mobile header -->
     <header class="drag-region flex min-h-16 items-center justify-between border-b border-white/5 bg-surface-0 px-4 py-3 md:hidden">
       <div class="brand-lockup">
-        <span class="brand-mark h-8 w-8 rounded-lg text-xs">L</span>
+        <img src="/logo.png" alt="Light" class="brand-logo h-8 w-8 rounded-lg" />
         <div>
           <div class="text-xs font-bold tracking-[0.18em] text-content">LIGHT</div>
           <div class="text-[9px] uppercase tracking-[0.14em] text-content-faint">Local transfer</div>

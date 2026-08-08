@@ -15,13 +15,27 @@ const settings = ref<Settings>({
 
 let inited = false
 
+function normalizeDownloadDir(value: Settings): Settings {
+  const wails = typeof window !== 'undefined' ? (window as any).wails : null
+  if (
+    wails?.platform?.() !== 'android' ||
+    !value.downloadDir.startsWith('/tree/') ||
+    !value.downloadDirUri ||
+    typeof wails.getFolderDisplayName !== 'function'
+  ) {
+    return value
+  }
+  const displayName = wails.getFolderDisplayName(value.downloadDirUri)
+  return displayName ? { ...value, downloadDir: displayName } : value
+}
+
 export function useSettings() {
   async function init() {
     if (inited) return
     inited = true
-    settings.value = await SettingsService.GetSettings()
+    settings.value = normalizeDownloadDir(await SettingsService.GetSettings())
     listen('settings-changed', (s: Settings) => {
-      settings.value = s
+      settings.value = normalizeDownloadDir(s)
     })
   }
   return { settings, init }
