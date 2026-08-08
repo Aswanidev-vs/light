@@ -126,6 +126,12 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
 
+  /* Keep the mobile brand below status bars and display cutouts. Android's
+     native WebView also applies its system inset when edge-to-edge is active. */
+  .mobile-header {
+    padding-top: max(0.75rem, env(safe-area-inset-top, 0px));
+  }
+
   .drop-zone {
     background-image: linear-gradient(135deg, rgba(240, 165, 0, 0.04), transparent 48%),
       radial-gradient(circle at 50% 0%, rgba(52, 211, 153, 0.08), transparent 42%);

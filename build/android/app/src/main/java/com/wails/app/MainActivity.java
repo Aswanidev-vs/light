@@ -32,6 +32,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.PermissionRequest;
 import android.webkit.WebView;
+import android.view.WindowInsets;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -132,6 +133,19 @@ public class MainActivity extends AppCompatActivity {
     private void setupWebView() {
         webView = findViewById(R.id.webview);
         bridge.setWebView(webView);
+
+        // Android 15 enforces edge-to-edge for apps targeting SDK 35. Apply
+        // only the top system-bar inset to the WebView so the mobile header
+        // starts below the status bar without changing the bottom nav layout.
+        webView.setOnApplyWindowInsetsListener((view, insets) -> {
+            int statusBarInset = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    ? insets.getInsets(WindowInsets.Type.statusBars()).top
+                    : insets.getSystemWindowInsetTop();
+            view.setPadding(view.getPaddingLeft(), statusBarInset,
+                    view.getPaddingRight(), view.getPaddingBottom());
+            return insets;
+        });
+        webView.requestApplyInsets();
 
         // Configure WebView settings
         WebSettings settings = webView.getSettings();
