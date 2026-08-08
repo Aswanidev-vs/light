@@ -66,7 +66,10 @@ type FileManifestEntry struct {
 
 type PreparePayload struct {
 	TransferID string              `json:"transferId"`
+	SenderID   string              `json:"senderId,omitempty"`
 	SenderName string              `json:"senderName"`
+	SenderAddr string              `json:"senderAddr,omitempty"`
+	SenderType DeviceType          `json:"senderType,omitempty"`
 	Files      []FileManifestEntry `json:"files"`
 }
 

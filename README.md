@@ -37,6 +37,8 @@ removed after sending and stale picker cache is cleaned at app startup.
 - **Real-time Progress** — Live speed, ETA, and per-file progress tracking
 - **Pause / Resume / Cancel** — Full transfer control at any time
 - **Accept / Reject** — Incoming files require consent (or auto-accept)
+- **Bidirectional Sharing** — Each peer can send back to a remembered sender
+- **Parallel Transfers** — Up to four selected files can upload concurrently
 - **Transfer History** — Completed and failed transfers are logged
 - **Safe file handling** — Collision-safe destination names plus automatic cleanup of failed and stale partial files
 - **Dark Theme** — Industrial-utilitarian design with amber accents

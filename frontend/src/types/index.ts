@@ -10,7 +10,10 @@ export interface PendingFile {
 
 export interface PendingReceive {
   transferId: string
+  senderId: string
   senderName: string
+  senderAddr: string
+  senderType: string
   files: PendingFile[]
   selected: string[]
 }

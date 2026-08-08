@@ -1,25 +1,38 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import { useTransfers } from '../composables/useTransfers'
 import { useSettings } from '../composables/useSettings'
+import { useDiscovery } from '../composables/useDiscovery'
 import FileRow from '../components/transfer/FileRow.vue'
 import Icon from '../components/common/Icon.vue'
 
-const { transfers, pause, resume, cancel } = useTransfers()
+const { transfers, pause, resume, cancel, lastIncomingPeer } = useTransfers()
 const { settings } = useSettings()
+const { select } = useDiscovery()
+const router = useRouter()
 
 // On Android, receiving is impossible without a SAF download folder.
 const needsFolder = computed(
   () => (window as any).wails?.platform?.() === 'android' && !settings.value.downloadDirUri,
 )
+
+function shareBack() {
+  const peer = lastIncomingPeer.value
+  if (!peer) return
+  select(peer.id)
+  router.push('/send')
+}
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
       <div><div class="page-kicker">Transfers</div><h1 class="page-title">Receive</h1></div>
-      <div class="hidden text-right text-xs text-content-faint md:block">Incoming files</div>
+      <div class="flex items-center gap-2">
+        <button v-if="lastIncomingPeer" class="btn-ghost text-xs" @click="shareBack">Share back</button>
+        <div class="hidden text-right text-xs text-content-faint md:block">Incoming files</div>
+      </div>
     </div>
 
     <div

@@ -9,8 +9,11 @@ feature.
 - Bidirectional file transfers between Light peers.
 - Plain HTTP over TCP is the stable default transport.
 - Configurable transfer server port; the default is `9120`.
-- Multiple files can be selected in one transfer request. Files are currently
-  uploaded sequentially, not in parallel.
+- Multiple files can be selected in one transfer request and uploaded with up
+  to four concurrent workers.
+- Every Light instance can send and receive. Incoming sender identity and
+  address are remembered locally so the receiver can use the Share back action
+  or select that peer from the Send view.
 - Streaming progress events with transferred bytes, percentage, speed, and
   status.
 - Active outgoing transfers support pause, resume, and cancel.
@@ -109,7 +112,6 @@ and transfer port are reachable. It does not create a network path by itself.
 
 - Native Wi-Fi Direct connection management.
 - Automatic hotspot creation or network switching.
-- Parallel multi-file transfer scheduling.
 - Resume-after-restart or chunk-level resume for interrupted files.
 - PIN-based transfer authentication.
 - SQLite persistence.
