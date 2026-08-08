@@ -133,6 +133,18 @@ public class WailsJSBridge {
     }
 
     /**
+     * Resolve a saved SAF URI to the folder name shown by the Android provider.
+     * Called from JavaScript as wails.getFolderDisplayName(uri).
+     */
+    @JavascriptInterface
+    public String getFolderDisplayName(String uri) {
+        if (webView.getContext() instanceof MainActivity) {
+            return ((MainActivity) webView.getContext()).getFolderDisplayName(uri);
+        }
+        return "";
+    }
+
+    /**
      * Copy a finished download (staged in app-internal storage by Go) into the
      * SAF folder the user picked. Called from JavaScript:
      * wails.copyToFolder(JSON.stringify({uri, fileName, sourcePath}))

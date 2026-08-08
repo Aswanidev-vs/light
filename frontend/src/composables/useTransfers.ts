@@ -50,14 +50,16 @@ export function useTransfers() {
       })
     })
     listen('transfer-complete', (p: any) => {
+      const previous = transfers.value.find((t) => t.id === p.id)
+      const size = p.size ?? previous?.size ?? 0
       upsert({
         id: p.id,
         filename: p.filename,
         status: TransferStatus.StatusCompleted,
-        size: p.size || 0,
-        transferred: p.size || 0,
+        size,
+        transferred: size,
         percent: 100,
-        filePath: p.filePath,
+        filePath: p.filePath || previous?.filePath,
       })
       // On Android the receiver stages files app-internal (scoped storage
       // blocks raw writes to shared storage). Move the finished file into the

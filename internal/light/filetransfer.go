@@ -263,7 +263,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	s.manager.Complete(subID, path, sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
-			"id": subID, "filename": fname, "filePath": path, "checksum": sum,
+			"id": subID, "filename": fname, "size": size, "filePath": path, "checksum": sum,
 			"destination": dest, "destinationUri": s.settings.GetSettings().DownloadDirUri,
 		})
 	}
@@ -443,7 +443,7 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 	s.manager.Complete(subID, "", sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
-			"id": subID, "filename": fname, "filePath": "", "checksum": sum,
+			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": sum,
 		})
 	}
 	return nil

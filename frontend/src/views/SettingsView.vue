@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watchEffect, onUnmounted } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { useSettings } from '../composables/useSettings'
 import { SettingsService } from '../../bindings/light/internal/light'
 import { useUI } from '../composables/useUI'
@@ -10,9 +10,9 @@ const { settings } = useSettings()
 const { toast } = useUI()
 
 const local = ref({ ...settings.value })
-watchEffect(() => {
+watch(settings, () => {
   local.value = { ...settings.value }
-})
+}, { immediate: true })
 
 async function save() {
   try {

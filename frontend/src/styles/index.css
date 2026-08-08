@@ -118,8 +118,8 @@
     @apply flex items-center gap-2.5;
   }
 
-  .brand-mark {
-    @apply grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-sm font-black tracking-[-0.08em] text-ink shadow-[0_8px_22px_rgba(240,165,0,0.2)];
+  .brand-logo {
+    @apply h-9 w-9 shrink-0 rounded-xl border border-white/10 bg-black object-cover shadow-[0_8px_22px_rgba(0,0,0,0.24)];
   }
 
   .mobile-nav {
