@@ -20,7 +20,7 @@
 
 1. **Discovery** — Devices broadcast their presence via UDP beacons on the local network (port 9129). Each device periodically sends a JSON heartbeat containing its ID, name, type, and transfer port. Other devices listen and maintain a live device table with a 10-second TTL.
 2. **Pairing** — Scan a QR code or enter a 6-digit code to connect devices across subnets, or when auto-discovery doesn't reach them.
-3. **Transfer** — The sender streams files over plain HTTP/TCP by default. The optional QUIC setting tries HTTP/3 first and falls back to TCP before any file body is sent. Each file is sent with a SHA-256 checksum header for integrity verification.
+3. **Transfer** — The sender streams files over plain HTTP/TCP by default. The optional QUIC setting probes HTTP/3 first and falls back to TCP before the transfer is prepared. Each file includes a SHA-256 checksum; the receiver hashes the incoming stream, rejects mismatches, and only then moves the partial file into place.
 4. **Accept/Reject** — The receiver sees an incoming file prompt and can accept or decline. Auto-accept can be enabled in settings.
 5. **Progress** — Real-time progress, speed, and ETA are shown for every transfer. Pause, resume, and cancel are supported.
 
@@ -32,19 +32,22 @@ removed after sending and stale picker cache is cleaned at app startup.
 ## Features
 
 - **Zero Config** — Auto-discovery on LAN, no manual setup required
-- **Cross-Platform** — Windows, macOS, Linux, Android, iOS via Wails v3
+- **Cross-Platform** — Wails-based desktop and mobile targets, with Windows and Android builds in the current release workflow
 - **QR Pairing** — Scan a QR code or enter a 6-digit code to connect devices
 - **Real-time Progress** — Live speed, ETA, and per-file progress tracking
 - **Pause / Resume / Cancel** — Full transfer control at any time
 - **Accept / Reject** — Incoming files require consent (or auto-accept)
 - **Transfer History** — Completed and failed transfers are logged
+- **Safe file handling** — Collision-safe destination names plus automatic cleanup of failed and stale partial files
 - **Dark Theme** — Industrial-utilitarian design with amber accents
+
+See [docs/FEATURES.md](docs/FEATURES.md) for the complete current feature inventory and known limitations.
 
 ## Experimental QUIC transport
 
 TCP remains the stable default. The `quic` transport setting probes HTTP/3
-over UDP on the transfer port and falls back to TCP before any file body is
-sent when the peer does not support QUIC or UDP is unavailable.
+over UDP on the transfer port and falls back to TCP before `/api/prepare` or
+any file body is sent when the peer does not support QUIC or UDP is unavailable.
 
 QUIC mode is opt-in and should be enabled on each peer that should accept
 HTTP/3. It uses an ephemeral self-signed certificate: traffic is encrypted,
@@ -151,7 +154,6 @@ Settings are stored in `~/.light/settings.json`:
   "downloadDir": "~/Downloads/Light",
   "autoAccept": false,
   "theme": "dark",
-  "enableEncryption": false,
   "transportMode": "tcp"
 }
 ```
