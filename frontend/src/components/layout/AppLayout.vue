@@ -56,7 +56,7 @@ const nav = [
     </aside>
 
     <!-- Mobile header -->
-    <header class="drag-region flex min-h-16 items-center justify-between border-b border-white/5 bg-surface-0 px-4 py-3 md:hidden">
+    <header class="mobile-header drag-region flex min-h-16 items-center justify-between border-b border-white/5 bg-surface-0 px-4 pb-3 md:hidden">
       <div class="brand-lockup">
         <img src="/logo.png" alt="Light" class="brand-logo h-8 w-8 rounded-lg" />
         <div>
