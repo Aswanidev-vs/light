@@ -143,11 +143,11 @@ onBeforeUnmount(() => {
 
 <template>
   <div
-    class="fixed inset-x-0 bottom-0 top-0 z-[1100] flex items-end justify-center bg-black/50 sm:items-center sm:p-4"
+    class="fixed inset-x-0 bottom-0 top-0 z-[1100] flex items-end justify-center bg-black/50 pb-[max(1rem,env(safe-area-inset-bottom))] sm:items-center sm:p-4"
     :style="{ height: viewportHeight }"
     @click.self="close"
   >
-    <div class="card w-full max-w-md animate-slideUp overflow-y-auto p-5" :class="scanning ? '' : 'max-h-[85vh]'">
+    <div class="card w-full max-w-md animate-slideUp overflow-y-auto p-5" :class="scanning ? 'max-h-[calc(100dvh-1rem)]' : 'max-h-[85vh]'">
       <div class="mb-4 flex items-center justify-between">
         <h2 class="flex items-center gap-2 font-semibold">
           <Icon name="qrcode" /> Pair a device

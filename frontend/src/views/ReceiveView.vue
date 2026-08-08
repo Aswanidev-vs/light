@@ -24,7 +24,7 @@ const needsFolder = computed(
 
     <div
       v-if="needsFolder"
-      class="card mb-5 flex items-center gap-3 border-danger/30 bg-danger/10 p-4"
+      class="card mb-4 flex flex-wrap items-center gap-3 border-danger/30 bg-danger/10 p-4 sm:mb-5 sm:flex-nowrap"
     >
       <div class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-danger/20 text-danger">
         <Icon name="warning" />
@@ -35,26 +35,26 @@ const needsFolder = computed(
           You can't receive files until you pick a download folder in Settings.
         </div>
       </div>
-      <RouterLink to="/settings" class="btn-ghost shrink-0 border border-white/10">Set folder</RouterLink>
+      <RouterLink to="/settings" class="btn-ghost w-full shrink-0 border border-white/10 sm:w-auto">Set folder</RouterLink>
     </div>
 
-    <div class="card mb-5 flex flex-wrap items-center gap-3 p-4 md:p-5">
+    <div class="card mb-4 flex flex-wrap items-center gap-3 p-4 sm:mb-5 sm:flex-nowrap sm:p-5">
       <div class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ok/15 text-ok">
         <Icon name="receive" />
       </div>
       <div class="min-w-0 flex-1">
         <div class="font-medium">Ready to receive</div>
         <div class="truncate text-xs text-content-faint">
-          Downloads to {{ settings.downloadDir }} · Port {{ settings.port }}
+          Downloads to {{ settings.downloadDir }} / Port {{ settings.port }}
         </div>
       </div>
       <span class="shrink-0 rounded-full bg-ok/20 px-2 py-0.5 text-xs text-ok">Active</span>
     </div>
 
-    <p v-if="transfers.length === 0" class="grid flex-1 place-items-center text-sm text-content-faint">
+    <p v-if="transfers.length === 0" class="grid min-h-40 flex-1 place-items-center text-center text-sm text-content-faint">
       Incoming transfers will appear here.
     </p>
-    <div v-else class="flex flex-1 flex-col gap-2">
+    <div v-else class="min-h-0 flex-1 space-y-2 overflow-y-auto pr-0.5">
       <FileRow
         v-for="t in transfers"
         :key="t.id"

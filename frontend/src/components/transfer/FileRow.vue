@@ -22,14 +22,14 @@ const statusLabel: Record<string, string> = {
 </script>
 
 <template>
-  <div class="card flex items-center gap-3 p-3">
-    <div class="grid h-10 w-10 place-items-center rounded-lg bg-surface-2 text-content-muted">
+  <div class="card grid grid-cols-[auto_minmax(0,1fr)] gap-3 p-3 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:p-3.5">
+    <div class="grid h-10 w-10 place-items-center rounded-lg bg-surface-2 text-content-muted sm:h-11 sm:w-11">
       <Icon name="file" />
     </div>
     <div class="min-w-0 flex-1">
       <div class="flex items-center justify-between gap-2">
         <span class="truncate font-medium">{{ transfer.filename }}</span>
-        <span class="shrink-0 text-xs text-content-faint">{{ statusLabel[transfer.status] || transfer.status }}</span>
+        <span class="shrink-0 rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-content-faint">{{ statusLabel[transfer.status] || transfer.status }}</span>
       </div>
       <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-content-faint">
         <span class="font-mono">{{ formatBytes(transfer.transferred) }} / {{ formatBytes(transfer.size) }}</span>
@@ -40,7 +40,7 @@ const statusLabel: Record<string, string> = {
         <ProgressBar :percent="transfer.percent" :active="transfer.status === 'active'" :failed="transfer.status === 'failed'" />
       </div>
     </div>
-    <div class="flex shrink-0 items-center gap-1">
+    <div class="col-start-2 flex items-center gap-1 sm:col-start-auto">
       <button
         v-if="transfer.status === 'active'"
         class="btn-ghost px-2"
