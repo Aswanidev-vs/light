@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -42,7 +43,10 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 
 	prepareBody, err := json.Marshal(PreparePayload{
 		TransferID: transferID,
+		SenderID:   "integration-sender-id",
 		SenderName: "integration sender",
+		SenderAddr: "192.168.1.10:9120",
+		SenderType: DeviceTypeDesktop,
 		Files:      []FileManifestEntry{{Name: filename, Size: int64(len(payload)), Checksum: checksum}},
 	})
 	if err != nil {
@@ -55,6 +59,10 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 	defer prepareResponse.Body.Close()
 	if prepareResponse.StatusCode != http.StatusOK {
 		t.Fatalf("prepare status = %d, want %d", prepareResponse.StatusCode, http.StatusOK)
+	}
+	state := service.accepts[transferID]
+	if state == nil || state.senderID != "integration-sender-id" || state.senderAddr != "192.168.1.10:9120" || state.senderType != DeviceTypeDesktop {
+		t.Fatalf("sender metadata = %#v, want persisted sender identity", state)
 	}
 
 	transferRequest, err := http.NewRequest(http.MethodPut, server.URL+"/api/transfer", bytes.NewReader(payload))
@@ -85,6 +93,112 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 	history := manager.GetHistory(1)
 	if len(history) != 1 || history[0].Status != StatusCompleted || history[0].Size != int64(len(payload)) || history[0].FilePath == "" {
 		t.Fatalf("history = %#v, want one completed transfer with a file path", history)
+	}
+}
+
+func TestSendFilesUploadsInParallel(t *testing.T) {
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DeviceName: "parallel sender", Port: 9120}, id: "parallel-sender-id"}
+	service := NewFileTransferService(nil, manager, settings, nil)
+
+	var active int32
+	var peak int32
+	updatePeak := func(value int32) {
+		for {
+			old := atomic.LoadInt32(&peak)
+			if value <= old || atomic.CompareAndSwapInt32(&peak, old, value) {
+				return
+			}
+		}
+	}
+
+	var manifest PreparePayload
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&manifest); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("accepted"))
+	})
+	mux.HandleFunc("/api/transfer", func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&active, 1)
+		updatePeak(current)
+		defer atomic.AddInt32(&active, -1)
+
+		time.Sleep(50 * time.Millisecond)
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	paths := make([]string, 8)
+	for i := range paths {
+		paths[i] = filepath.Join(t.TempDir(), "file-"+strconv.Itoa(i)+".bin")
+		if err := os.WriteFile(paths[i], []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := service.SendFiles(TransferRequest{DeviceAddr: server.Listener.Addr().String(), FilePaths: paths})
+	if err != nil {
+		t.Fatalf("SendFiles() error = %v", err)
+	}
+	if peak < 2 {
+		t.Fatalf("peak parallel uploads = %d, want more than one", peak)
+	}
+	if peak > maxParallelUploads {
+		t.Fatalf("peak parallel uploads = %d, want at most %d", peak, maxParallelUploads)
+	}
+	if manifest.SenderID != "parallel-sender-id" || manifest.SenderAddr == "" || manifest.SenderType != DeviceTypeDesktop {
+		t.Fatalf("manifest sender metadata = %#v, want sender identity, address, and type", manifest)
+	}
+}
+
+func TestSendFilesContinuesAfterPerFileFailure(t *testing.T) {
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DeviceName: "failure sender", Port: 9120}, id: "failure-sender-id"}
+	service := NewFileTransferService(nil, manager, settings, nil)
+
+	var completed int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("accepted"))
+	})
+	mux.HandleFunc("/api/transfer", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.Header.Get("X-Filename") == "file-0.bin" {
+			http.Error(w, "intentional test failure", http.StatusInternalServerError)
+			return
+		}
+		atomic.AddInt32(&completed, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	paths := make([]string, 3)
+	for i := range paths {
+		paths[i] = filepath.Join(t.TempDir(), "file-"+strconv.Itoa(i)+".bin")
+		if err := os.WriteFile(paths[i], []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := service.SendFiles(TransferRequest{DeviceAddr: server.Listener.Addr().String(), FilePaths: paths})
+	if err == nil || !strings.Contains(err.Error(), "file-0.bin") {
+		t.Fatalf("SendFiles() error = %v, want the failed file reported", err)
+	}
+	if got := atomic.LoadInt32(&completed); got != 2 {
+		t.Fatalf("successful sibling uploads = %d, want 2", got)
 	}
 }
 

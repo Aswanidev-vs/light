@@ -25,8 +25,13 @@ const chunkSize = 1 << 20 // 1MB
 
 const partialFileMaxAge = 24 * time.Hour
 
+const maxParallelUploads = 4
+
 type acceptState struct {
-	status string // pending | accepted | rejected | cancelled
+	status     string // pending | accepted | rejected | cancelled
+	senderID   string
+	senderAddr string
+	senderType DeviceType
 }
 
 // sendControl governs a single outgoing file upload (pause/resume/cancel).
@@ -181,6 +186,9 @@ func (s *FileTransferService) handlePrepare(w http.ResponseWriter, r *http.Reque
 		st = &acceptState{status: "pending"}
 		s.accepts[p.TransferID] = st
 	}
+	st.senderID = p.SenderID
+	st.senderAddr = p.SenderAddr
+	st.senderType = p.SenderType
 	s.mu.Unlock()
 
 	for _, f := range p.Files {
@@ -247,6 +255,14 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	s.mu.Lock()
 	st := s.accepts[tid]
 	accepted := st != nil && st.status == "accepted"
+	senderID := ""
+	senderAddr := ""
+	senderType := DeviceType("")
+	if st != nil {
+		senderID = st.senderID
+		senderAddr = st.senderAddr
+		senderType = st.senderType
+	}
 	s.mu.Unlock()
 	if !accepted {
 		http.Error(w, "not accepted", 409)
@@ -361,6 +377,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		s.app.Event.Emit("transfer-complete", map[string]any{
 			"id": subID, "filename": fname, "size": size, "filePath": path, "checksum": sum,
 			"destination": dest, "destinationUri": s.settings.GetSettings().DownloadDirUri,
+			"senderId": senderID, "senderAddr": senderAddr, "senderType": senderType,
 		})
 	}
 	w.WriteHeader(200)
@@ -437,7 +454,14 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 	}
 
 	tid := newID()
-	p := PreparePayload{TransferID: tid, SenderName: s.settings.GetSettings().DeviceName, Files: entries}
+	p := PreparePayload{
+		TransferID: tid,
+		SenderID:   s.settings.DeviceID(),
+		SenderName: s.settings.GetSettings().DeviceName,
+		SenderAddr: s.localEndpoint(),
+		SenderType: PlatformDeviceType(),
+		Files:      entries,
+	}
 	client, scheme, closeClient, err := s.clientForPeer(req.DeviceAddr)
 	if err != nil {
 		return err
@@ -470,12 +494,38 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		}
 	}
 
+	semaphore := make(chan struct{}, maxParallelUploads)
+	var wg sync.WaitGroup
+	var failuresMu sync.Mutex
+	var failures []string
+
 	for i, p2 := range paths {
-		if err := s.uploadWithClient(tid, req.DeviceAddr, p2, entries[i].Name, entries[i].Size, entries[i].Checksum, client, scheme); err != nil {
-			return err
-		}
+		entry := entries[i]
+		wg.Add(1)
+		go func(path string, file FileManifestEntry) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			if err := s.uploadWithClient(tid, req.DeviceAddr, path, file.Name, file.Size, file.Checksum, client, scheme); err != nil {
+				failuresMu.Lock()
+				failures = append(failures, fmt.Sprintf("%s: %v", file.Name, err))
+				failuresMu.Unlock()
+			}
+		}(p2, entry)
+	}
+	wg.Wait()
+	if len(failures) > 0 {
+		return fmt.Errorf("%d file(s) failed: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func (s *FileTransferService) localEndpoint() string {
+	if s.discovery != nil {
+		return s.discovery.LocalEndpoint()
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(s.settings.GetSettings().Port))
 }
 
 func (s *FileTransferService) waitAccept(peerAddr, tid string, client *http.Client, scheme string) bool {

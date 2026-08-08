@@ -3,15 +3,33 @@ import { FileTransferService, TransferManager } from '../../bindings/light/inter
 import { listen } from '../lib/events'
 import { useUI } from './useUI'
 import { useSettings } from './useSettings'
-import type { Transfer, PendingReceive } from '../types'
-import { TransferStatus } from '../../bindings/light/internal/light'
+import { useDiscovery } from './useDiscovery'
+import type { Device, Transfer, PendingReceive } from '../types'
+import { DeviceType, TransferStatus } from '../../bindings/light/internal/light'
 
 const { toast } = useUI()
 
 const transfers = ref<Transfer[]>([])
 const history = ref<Transfer[]>([])
 const pendingReceive = ref<PendingReceive | null>(null)
+const lastIncomingPeer = ref<Device | null>(null)
 let inited = false
+
+const discovery = useDiscovery()
+
+function rememberIncomingPeer(payload: any) {
+  if (!payload?.senderAddr) return
+  const peer: Device = {
+    id: payload.senderId || payload.senderAddr,
+    name: payload.senderName || 'Light device',
+    type: payload.senderType === 'mobile' ? DeviceType.DeviceTypeMobile : DeviceType.DeviceTypeDesktop,
+    address: payload.senderAddr,
+    code: '',
+    lastSeen: new Date(),
+  }
+  lastIncomingPeer.value = peer
+  discovery.rememberPeer(peer)
+}
 
 function upsert(t: Partial<Transfer> & { id: string }) {
   const i = transfers.value.findIndex((x) => x.id === t.id)
@@ -50,6 +68,7 @@ export function useTransfers() {
       })
     })
     listen('transfer-complete', (p: any) => {
+      rememberIncomingPeer(p)
       const previous = transfers.value.find((t) => t.id === p.id)
       const size = p.size ?? previous?.size ?? 0
       upsert({
@@ -84,6 +103,7 @@ export function useTransfers() {
       }
     })
     listen('prepare-receive', (p: any) => {
+      rememberIncomingPeer(p)
       // On Android, receiving requires a SAF folder: without one the finished
       // file would be stranded in app-internal storage. Reject the transfer
       // and tell the user to set a download folder first.
@@ -96,7 +116,10 @@ export function useTransfers() {
       }
       pendingReceive.value = {
         transferId: p.transferId,
+        senderId: p.senderId || p.senderAddr || '',
         senderName: p.senderName,
+        senderAddr: p.senderAddr || '',
+        senderType: p.senderType || 'desktop',
         files: p.files,
         selected: p.files.map((f: any) => f.name),
       }
@@ -141,6 +164,7 @@ export function useTransfers() {
     transfers,
     history,
     pendingReceive,
+    lastIncomingPeer,
     init,
     acceptReceive,
     rejectReceive,
