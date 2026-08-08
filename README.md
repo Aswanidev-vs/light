@@ -20,7 +20,7 @@
 
 1. **Discovery** — Devices broadcast their presence via UDP beacons on the local network (port 9129). Each device periodically sends a JSON heartbeat containing its ID, name, type, and transfer port. Other devices listen and maintain a live device table with a 10-second TTL.
 2. **Pairing** — Scan a QR code or enter a 6-digit code to connect devices across subnets, or when auto-discovery doesn't reach them.
-3. **Transfer** — The sender streams files over plain HTTP to the receiver's device. Each file is sent with a SHA-256 checksum header for integrity verification.
+3. **Transfer** — The sender streams files over plain HTTP/TCP by default. The optional QUIC setting tries HTTP/3 first and falls back to TCP before any file body is sent. Each file is sent with a SHA-256 checksum header for integrity verification.
 4. **Accept/Reject** — The receiver sees an incoming file prompt and can accept or decline. Auto-accept can be enabled in settings.
 5. **Progress** — Real-time progress, speed, and ETA are shown for every transfer. Pause, resume, and cancel are supported.
 
@@ -35,6 +35,28 @@
 - **Transfer History** — Completed and failed transfers are logged
 - **Dark Theme** — Industrial-utilitarian design with amber accents
 
+## Experimental QUIC transport
+
+TCP remains the stable default. The `quic` transport setting probes HTTP/3
+over UDP on the transfer port and falls back to TCP before any file body is
+sent when the peer does not support QUIC or UDP is unavailable.
+
+QUIC mode is opt-in and should be enabled on each peer that should accept
+HTTP/3. It uses an ephemeral self-signed certificate: traffic is encrypted,
+but peer identity is not authenticated yet. TCP remains the recommended
+default.
+
+Direct Wi-Fi/Android Wi-Fi Direct and Windows Wi-Fi Direct adapters are not
+part of the current transport mode. The app can still use a manually created
+hotspot or Wi-Fi Direct network when the devices receive reachable LAN
+addresses; native connection management is a separate platform integration.
+
+To compare the local transport paths:
+
+```bash
+go test ./internal/light -run '^$' -bench '^BenchmarkTransferTransport$' -benchtime=1s
+```
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -42,7 +64,7 @@
 | Backend | Go 1.25 + Wails v3 |
 | Frontend | Vue 3 + TypeScript + Vite 8 + Tailwind CSS 3 |
 | Discovery | UDP broadcast beacons (port 9129) |
-| Transfer | Plain HTTP (port 9120, configurable) |
+| Transfer | Plain HTTP/TCP (port 9120, configurable) with optional HTTP/3 over QUIC |
 | History | JSON file (`~/.light/history.json`) |
 | QR | [skip2/go-qrcode](https://github.com/skip2/go-qrcode) + jsQR (browser) |
 
@@ -55,6 +77,8 @@ internal/light/              Go backend package
   settings.go                SettingsService — config persistence + device ID
   discovery.go               DiscoveryService — UDP beacon broadcast + Diagnostics
   filetransfer.go            FileTransferService — HTTP server + sender upload
+  quic.go                    Experimental HTTP/3 server/client + TCP fallback
+  transport_bench_test.go    Local TCP-versus-QUIC integration test and benchmark
   transfermanager.go         TransferManager — progress tracking + JSON history
   qr.go                      QRCodeService — QR generation + pairing codes
   broadcast_windows.go       SO_BROADCAST (Windows, syscall)
@@ -122,7 +146,8 @@ Settings are stored in `~/.light/settings.json`:
   "downloadDir": "~/Downloads/Light",
   "autoAccept": false,
   "theme": "dark",
-  "enableEncryption": false
+  "enableEncryption": false,
+  "transportMode": "tcp"
 }
 ```
 
@@ -133,6 +158,7 @@ Settings are stored in `~/.light/settings.json`:
 | `downloadDir` | `~/Downloads/Light` | Where received files are saved |
 | `autoAccept` | false | Accept incoming files without prompting |
 | `theme` | dark | UI theme (dark only for now) |
+| `transportMode` | tcp | `tcp` for the stable path, or `quic` to try HTTP/3 first and fall back to TCP |
 
 ## Architecture
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -115,6 +116,11 @@ func (s *SettingsService) load() {
 	if s.cfg.Theme == "" {
 		s.cfg.Theme = "dark"
 	}
+	if s.cfg.TransportMode == "" {
+		s.cfg.TransportMode = "tcp"
+	} else {
+		s.cfg.TransportMode = normalizeTransportMode(s.cfg.TransportMode)
+	}
 
 	idPath := filepath.Join(configDir(), "deviceid")
 	if b, err := os.ReadFile(idPath); err == nil {
@@ -155,6 +161,9 @@ func (s *SettingsService) UpdateSettings(s2 Settings) {
 	s.cfg.AutoAccept = s2.AutoAccept
 	s.cfg.Theme = s2.Theme
 	s.cfg.EnableEncryption = s2.EnableEncryption
+	if s2.TransportMode != "" {
+		s.cfg.TransportMode = normalizeTransportMode(s2.TransportMode)
+	}
 	s.mu.Unlock()
 	s.save()
 	s.emit()
@@ -204,4 +213,11 @@ func defaultDownloadDir() string {
 		return "Light"
 	}
 	return filepath.Join(home, "Downloads", "Light")
+}
+
+func normalizeTransportMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "quic") {
+		return "quic"
+	}
+	return "tcp"
 }
