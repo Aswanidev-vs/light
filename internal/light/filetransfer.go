@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,27 +38,27 @@ type sendControl struct {
 // FileTransferService runs a per-device HTTP server that receives files and
 // drives outgoing uploads to peers.
 type FileTransferService struct {
-	app      *application.App
-	manager  *TransferManager
-	settings *SettingsService
+	app       *application.App
+	manager   *TransferManager
+	settings  *SettingsService
 	discovery *DiscoveryService
 
-	mu      sync.Mutex
-	server  *http.Server
-	ln      net.Listener
-	mux     *http.ServeMux
-	accepts map[string]*acceptState
+	mu       sync.Mutex
+	server   *http.Server
+	ln       net.Listener
+	mux      *http.ServeMux
+	accepts  map[string]*acceptState
 	controls map[string]*sendControl
 }
 
 func NewFileTransferService(app *application.App, manager *TransferManager, settings *SettingsService, discovery *DiscoveryService) *FileTransferService {
 	return &FileTransferService{
-		app:      app,
-		manager:  manager,
-		settings: settings,
+		app:       app,
+		manager:   manager,
+		settings:  settings,
 		discovery: discovery,
-		accepts:  make(map[string]*acceptState),
-		controls: make(map[string]*sendControl),
+		accepts:   make(map[string]*acceptState),
+		controls:  make(map[string]*sendControl),
 	}
 }
 
@@ -191,9 +192,9 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dl := s.receiveDir()
-	if mkErr := os.MkdirAll(dl, 0o755); mkErr != nil {
-		http.Error(w, "cannot create destination dir: "+mkErr.Error(), 500)
+	dl, err := s.receiveDir()
+	if err != nil {
+		http.Error(w, "cannot create destination dir: "+err.Error(), 500)
 		return
 	}
 	path := uniquePath(filepath.Join(dl, sanitize(fname)))
@@ -273,23 +274,26 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 // receiveDir returns the directory the receiver writes incoming files to. On
 // mobile the chosen SAF folder is not raw-filesystem-writable under scoped
 // storage, so we stage into an app-internal dir; desktop honours DownloadDir.
-func (s *FileTransferService) receiveDir() string {
+func (s *FileTransferService) receiveDir() (string, error) {
 	if PlatformDeviceType() == DeviceTypeMobile {
-		dir := filepath.Join(configDir(), "downloads")
-		if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
-			return dir
+		var lastErr error
+		for _, dir := range []string{
+			filepath.Join(configDir(), "downloads"),
+			filepath.Join(os.TempDir(), "light-downloads"),
+		} {
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+				return dir, nil
+			} else {
+				lastErr = mkErr
+			}
 		}
-		// Fallback 1: temp dir
-		dir = filepath.Join(os.TempDir(), "light-downloads")
-		if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
-			return dir
-		}
-		// Fallback 2: current working directory
-		dir = filepath.Join(".", "light-downloads")
-		_ = os.MkdirAll(dir, 0o755)
-		return dir
+		return "", fmt.Errorf("no writable staging directory: %w", lastErr)
 	}
-	return s.settings.GetSettings().DownloadDir
+	dir := s.settings.GetSettings().DownloadDir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // ---- Sender side ----
@@ -433,7 +437,7 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 	if resp.StatusCode != 200 {
 		errMsg := fmt.Sprintf("receiver error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		s.failTransfer(subID, fname, errMsg)
-		return fmt.Errorf(errMsg)
+		return errors.New(errMsg)
 	}
 
 	s.manager.Complete(subID, "", sum)
