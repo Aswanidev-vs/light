@@ -1,288 +1,116 @@
-# Light — Feature Tracker
+# Light - Current Features
 
-## Status Legend
+This document describes behavior implemented in the current codebase. It is
+kept separate from the roadmap so planned work is not presented as a shipped
+feature.
 
-- **Planned** — Designed but not started
-- **In Progress** — Actively being implemented
-- **Done** — Implemented and verified
-- **Blocked** — Waiting on dependency
+## File sharing
 
----
+- Bidirectional file transfers between Light peers.
+- Plain HTTP over TCP is the stable default transport.
+- Configurable transfer server port; the default is `9120`.
+- Multiple files can be selected in one transfer request. Files are currently
+  uploaded sequentially, not in parallel.
+- Streaming progress events with transferred bytes, percentage, speed, and
+  status.
+- Active outgoing transfers support pause, resume, and cancel.
+- Incoming transfers can be accepted or declined. Auto-accept is available in
+  Settings.
+- Destination names are sanitized and made collision-safe instead of
+  overwriting an existing file.
+- Sender-provided file size and SHA-256 checksum are sent with each upload.
+  The receiver hashes the stream while writing and rejects a checksum
+  mismatch.
 
-## Phase 1: Project Setup
+Pause/resume applies to an active transfer. Interrupted transfers are not
+resumed after an application restart or a broken network connection.
 
-### F1.1 Rename Go module
-- **Status:** Done
-- **Description:** Change `module changeme` to `module light` in go.mod
-- **Acceptance:** `go build ./...` succeeds with new module name
-- **Dependencies:** None
+## Device discovery and pairing
 
-### F1.2 Update build config
-- **Status:** Done
-- **Description:** Update `build/config.yml` with Light product metadata
-- **Acceptance:** Config reflects correct product name, version, description
-- **Dependencies:** None
+- UDP beacon discovery on port `9129` for peers on the same LAN.
+- Beacons include a persistent device ID, device name, desktop/mobile type,
+  transfer port, pairing code, and timestamp.
+- Devices expire from the live list after roughly 10 seconds without a beacon.
+- Pairing by a six-digit code, with codes valid for five minutes.
+- QR pairing tickets containing the peer address, device ID, name, port, and
+  device type.
+- QR scanning through the browser `BarcodeDetector` API with a `jsQR`
+  fallback.
+- Discovery diagnostics expose the local ID, listener state, interface count,
+  sender count, peer count, and the last discovery error.
 
----
+QR pairing can connect devices across subnets only when the advertised address
+and transfer port are reachable. It does not create a network path by itself.
 
-## Phase 2: Go Backend
+## Receiver storage and cleanup
 
-### F2.1 File Transfer Service (HTTP)
-- **Status:** Done
-- **Description:** Core service for sending and receiving files via streaming HTTP
-- **Acceptance:**
-  - Can send a file to a target device
-  - Can receive a file from a source device
-  - Progress events emitted during transfer
-  - SHA-256 checksum verified on completion
-  - 32 parallel file transfers
-- **Dependencies:** F2.3 (Transfer Manager)
+- Desktop receivers write directly to the configured download folder.
+- Android receivers stage files in app-private storage, then copy completed
+  files into the folder selected through Android's Storage Access Framework.
+- Android requires a selected SAF folder before receiving files.
+- Failed or interrupted receive operations use a Light-owned partial filename
+  and remove it when the operation ends unsuccessfully.
+- Partial files older than 24 hours are pruned when the receive directory is
+  used.
+- Android picker copies and stale picker cache entries are cleaned after file
+  selection and during app startup.
 
-### F2.2 Device Discovery Service
-- **Status:** Done
-- **Description:** UDP broadcast-based LAN device discovery
-- **Acceptance:**
-  - Automatically discovers other Light instances on LAN
-  - Device list updates in real-time
-  - Shows device name, type, and status
-- **Dependencies:** None
+## History
 
-### F2.3 Transfer Manager
-- **Status:** Done
-- **Description:** Manages transfer queue, progress tracking, and concurrent transfers
-- **Acceptance:**
-  - Supports up to 32 concurrent transfers
-  - Pause/resume/cancel functionality
-  - Transfer history maintained in SQLite
-  - Speed and ETA calculated
-- **Dependencies:** F2.1
+- Completed, failed, and cancelled transfers are recorded in
+  `~/.light/history.json` (app-private storage on Android).
+- History is limited to the latest 500 entries.
+- The History view can clear the stored transfer history.
 
-### F2.4 Settings Service
-- **Status:** Done
-- **Description:** User preferences persistence (download dir, auto-accept, port, theme)
-- **Acceptance:**
-  - Settings read/write via frontend
-  - Settings persist across app restarts
-  - Default values sensible
-- **Dependencies:** None
+## User interface
 
-### F2.5 QUIC Transport
-- **Status:** Done
-- **Description:** High-speed QUIC protocol for file transfers with 0-RTT connection
-- **Acceptance:**
-  - 32 parallel streams
-  - 2MB stream buffer
-  - Built-in TLS 1.3 encryption
-  - No head-of-line blocking
-- **Dependencies:** F2.3
+- Send, Receive, History, and Settings views.
+- LAN device list with desktop/mobile icons and live status indicators.
+- Drag-and-drop and native file picker support for sending files.
+- Incoming transfer dialog with file names and sizes.
+- Transfer cards with progress, speed, status, pause/resume, and cancel
+  controls.
+- Responsive desktop, tablet, and mobile layouts with a desktop sidebar,
+  tablet navigation rail, mobile header, and mobile bottom navigation.
+- Safe-area-aware mobile dialogs, notifications, and navigation for devices
+  with status bars, cutouts, or gesture areas.
+- Dark industrial-style interface with amber accents.
 
-### F2.6 SQLite Database
-- **Status:** Done
-- **Description:** Persistent storage for transfer history and resume data
-- **Acceptance:**
-  - Transfers persist across app restarts
-  - Resume support for interrupted transfers
-  - Chunk tracking for partial downloads
-- **Dependencies:** F2.3
+## Settings
 
-### F2.7 PIN Protection
-- **Status:** Done
-- **Description:** Optional PIN for file transfers
-- **Acceptance:**
-  - Sender can set PIN for transfers
-  - Receiver must verify PIN before receiving
-  - PIN stored securely in database
-- **Dependencies:** F2.5, F2.6
+- Device name.
+- Download folder.
+- Transfer port.
+- Auto-accept incoming files.
+- Experimental transport toggle.
+- Settings and device identity persist in the app's `.light` configuration
+  directory.
 
----
+## Experimental QUIC transport
 
-## Phase 3: Frontend Architecture
+- Optional HTTP/3 over QUIC transport on the configured transfer port.
+- TCP remains available as the fallback path.
+- When QUIC mode is enabled for outgoing transfers, Light probes the peer
+  first. A failed handshake, unavailable UDP path, or peer using TCP causes a
+  fallback to TCP before the prepare request and file body are sent.
+- QUIC uses an ephemeral self-signed certificate. Traffic is encrypted, but
+  peer identity is not authenticated by a trust store yet.
+- QUIC is experimental and is not guaranteed to be faster than TCP on every
+  Wi-Fi, Ethernet, storage, or operating-system combination.
 
-### F3.1 TypeScript Types
-- **Status:** Done
-- **Description:** Define all TypeScript interfaces (Device, File, Transfer, Settings)
-- **Acceptance:**
-  - All types exported from `types/index.ts`
-  - Types match Go struct definitions
-- **Dependencies:** None
+## Platform support
 
-### F3.2 Composables
-- **Status:** Done
-- **Description:** Vue composables for device discovery, file transfer, and settings state
-- **Acceptance:**
-  - `useDeviceDiscovery` returns reactive device list
-  - `useFileTransfer` provides send/receive/pause/cancel functions
-  - `useSettings` provides reactive settings state
-- **Dependencies:** F3.1, F2.5
+- Go 1.25 backend with Wails v3.
+- Vue 3, TypeScript, Vite, and Tailwind CSS frontend.
+- The project contains Wails desktop and mobile build configuration. The
+  current GitHub workflow builds Windows and Android artifacts for releases.
 
-### F3.3 SVG Icon Components
-- **Status:** Done
-- **Description:** Inline SVG icon set (send, receive, device, file, progress, settings, history, status)
-- **Acceptance:**
-  - All icons render correctly
-  - No emojis used anywhere
-  - Icons accept size and color props
-- **Dependencies:** None
+## Not currently implemented
 
----
-
-## Phase 4: Frontend Components
-
-### F4.1 App Layout
-- **Status:** Done
-- **Description:** Root layout with sidebar + main content area, responsive for mobile
-- **Acceptance:**
-  - Desktop: sidebar (300px) + main area
-  - Mobile: full-width with bottom tab navigation
-  - Smooth transitions between views
-- **Dependencies:** F3.3
-
-### F4.2 Device List
-- **Status:** Done
-- **Description:** Sidebar showing discovered devices with status indicators
-- **Acceptance:**
-  - Lists all discovered devices
-  - Shows device name, type icon, connection status
-  - Click to select device for transfer
-  - Empty state when no devices found
-- **Dependencies:** F3.2, F4.1
-
-### F4.3 Transfer Area
-- **Status:** Done
-- **Description:** Main content area with drag-and-drop zone and active transfer list
-- **Acceptance:**
-  - Drag-and-drop files onto the area
-  - File picker button as alternative
-  - Shows active transfers with progress bars
-  - Shows completed transfers
-- **Dependencies:** F3.2, F4.1
-
-### F4.4 File Card
-- **Status:** Done
-- **Description:** Individual file display in transfer queue with name, size, progress
-- **Acceptance:**
-  - Shows file name and size
-  - Progress bar with percentage
-  - Transfer speed display
-  - Cancel button
-- **Dependencies:** F4.3
-
-### F4.5 Progress Bar
-- **Status:** Done
-- **Description:** Animated progress indicator with speed badge
-- **Acceptance:**
-  - Smooth animation (CSS transition)
-  - Shows percentage text
-  - Color changes at milestones (25%, 50%, 75%, 100%)
-- **Dependencies:** None
-
-### F4.6 Settings Panel
-- **Status:** Done
-- **Description:** Settings drawer/panel with all configuration options
-- **Acceptance:**
-  - Download directory picker
-  - Auto-accept toggle
-  - Port configuration
-  - Device name input
-  - Theme toggle
-- **Dependencies:** F3.2
-
-### F4.7 Transfer History
-- **Status:** Done
-- **Description:** List of completed/failed transfers with details
-- **Acceptance:**
-  - Shows transfer date, files, size, status
-  - Click to open file location
-  - Clear history option
-- **Dependencies:** F3.2
-
----
-
-## Phase 5: Styling
-
-### F5.1 Global Theme
-- **Status:** Done
-- **Description:** Industrial utilitarian CSS theme (charcoal base, amber accent)
-- **Acceptance:**
-  - CSS custom properties for all tokens
-  - Dark theme as default
-  - Typography: JetBrains Mono + DM Sans
-  - No generic AI aesthetics
-- **Dependencies:** None
-
-### F5.2 Component Styles
-- **Status:** Done
-- **Description:** Scoped styles for all components
-- **Acceptance:**
-  - Cards with subtle borders
-  - Hover/active states
-  - Transitions 150-200ms ease-out
-  - Responsive at 768px breakpoint
-- **Dependencies:** F5.1, F4.1-F4.7
-
----
-
-## Phase 6: CI/CD
-
-### F6.1 GitHub Actions Build Workflow
-- **Status:** Done
-- **Description:** `.github/workflows/build.yml` for Windows + Android builds
-- **Acceptance:**
-  - Windows: builds exe + NSIS installer
-  - Android: builds fat APK
-  - Release job creates GitHub Release on version tags
-  - All artifacts uploaded with 30-day retention
-- **Dependencies:** None
-
----
-
-## Phase 7: Performance Improvements
-
-### F7.1 QUIC Protocol
-- **Status:** Done
-- **Description:** Replace TCP with QUIC for 20-40% faster transfers
-- **Acceptance:**
-  - 0-RTT connection establishment
-  - 32 parallel streams
-  - Built-in TLS 1.3 encryption
-  - No head-of-line blocking
-- **Dependencies:** None
-
-### F7.2 SQLite Persistence
-- **Status:** Done
-- **Description:** Persistent transfer history and resume support
-- **Acceptance:**
-  - Transfers survive app restart
-  - Resume interrupted transfers
-  - Chunk tracking for partial downloads
-- **Dependencies:** None
-
-### F7.3 PIN Protection
-- **Status:** Done
-- **Description:** Optional PIN for secure file transfers
-- **Acceptance:**
-  - Sender can set PIN
-  - Receiver must verify PIN
-  - PIN stored in SQLite
-- **Dependencies:** F7.2
-
-### F7.4 Increased Parallelism
-- **Status:** Done
-- **Description:** Increase concurrent transfers from 4 to 32
-- **Acceptance:**
-  - 32 simultaneous file transfers
-  - 32 QUIC streams per connection
-  - 2MB buffer sizes
-- **Dependencies:** None
-
----
-
-## Implementation Order Complete
-
-All phases completed. The app now supports:
-- High-speed QUIC transfers with 0-RTT
-- 32 parallel streams/transfers
-- SQLite persistence for history and resume
-- PIN protection for secure transfers
-- Industrial utilitarian UI with no emojis
-- GitHub Actions CI/CD for Windows + Android
+- Native Wi-Fi Direct connection management.
+- Automatic hotspot creation or network switching.
+- Parallel multi-file transfer scheduling.
+- Resume-after-restart or chunk-level resume for interrupted files.
+- PIN-based transfer authentication.
+- SQLite persistence.
+- Authenticated TLS identity for the experimental QUIC path.
