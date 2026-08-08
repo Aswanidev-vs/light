@@ -96,7 +96,7 @@ onUnmounted(() => {
   <div class="page">
     <div class="page-header"><div><div class="page-kicker">Preferences</div><h1 class="page-title">Settings</h1></div></div>
 
-    <div class="card flex max-w-2xl flex-col gap-6 p-5 md:p-6">
+    <div class="card flex w-full max-w-3xl flex-col gap-5 p-4 sm:gap-6 sm:p-5 lg:p-6">
       <!-- Device name -->
       <div>
         <label class="field-label">Device name</label>
@@ -109,13 +109,13 @@ onUnmounted(() => {
       <!-- Download directory -->
       <div>
         <label class="field-label">Download folder</label>
-        <div class="flex gap-2">
+        <div class="flex flex-col gap-2 sm:flex-row">
           <input
             v-model="local.downloadDir"
             class="field-input flex-1 font-mono"
           />
-          <button class="btn-ghost border border-white/10" @click="pickFolder">Browse</button>
-          <button class="btn-ghost border border-white/10" @click="reset">Reset</button>
+          <button class="btn-ghost w-full border border-white/10 sm:w-auto" @click="pickFolder">Browse</button>
+          <button class="btn-ghost w-full border border-white/10 sm:w-auto" @click="reset">Reset</button>
         </div>
       </div>
 
@@ -127,7 +127,7 @@ onUnmounted(() => {
           type="number"
           min="1"
           max="65535"
-          class="field-input w-32"
+          class="field-input w-full sm:w-32"
         />
       </div>
 
@@ -152,7 +152,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Save -->
-      <button class="btn-accent self-start" @click="save">Save settings</button>
+      <button class="btn-accent w-full self-start sm:w-auto" @click="save">Save settings</button>
     </div>
   </div>
 </template>

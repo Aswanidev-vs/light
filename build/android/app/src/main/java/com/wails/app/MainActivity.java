@@ -436,9 +436,20 @@ public class MainActivity extends AppCompatActivity {
                 java.io.File source = new java.io.File(o.getString("sourcePath"));
                 if (!source.exists()) {
                     bridge.emitEvent("android:copyDone",
-                            "{\"ok\":false,\"error\":\"staging file missing\"}");
+                            "{\"ok\":false,\"error\":" + JSONObject.quote("staging file missing") + "}");
                     return;
                 }
+
+                if (!DocumentsContract.isTreeUri(treeUri)) {
+                    throw new IllegalArgumentException("Invalid folder URI");
+                }
+
+                // createDocument expects a document URI. The folder picker
+                // returns a tree URI, so first resolve that tree's root
+                // document URI before asking the provider to create a file.
+                String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
+                Uri parentDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
+                        treeUri, treeDocumentId);
 
                 // Create the destination document in the chosen folder.
                 String mime = android.webkit.MimeTypeMap.getSingleton()
@@ -446,13 +457,16 @@ public class MainActivity extends AppCompatActivity {
                                 ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase()
                                 : "");
                 Uri docUri = DocumentsContract.createDocument(getContentResolver(),
-                        treeUri, mime != null ? mime : "application/octet-stream", fileName);
+                        parentDocumentUri, mime != null ? mime : "application/octet-stream", fileName);
+                if (docUri == null) {
+                    throw new IllegalStateException("could not create destination file");
+                }
 
                 try (InputStream in = new FileInputStream(source);
                      OutputStream out = getContentResolver().openOutputStream(docUri)) {
                     if (out == null) {
                         bridge.emitEvent("android:copyDone",
-                                "{\"ok\":false,\"error\":\"cannot open destination\"}");
+                                "{\"ok\":false,\"error\":" + JSONObject.quote("cannot open destination") + "}");
                         return;
                     }
                     byte[] buf = new byte[64 * 1024];
@@ -464,12 +478,13 @@ public class MainActivity extends AppCompatActivity {
                 // Staging copy is no longer needed.
                 boolean deleted = source.delete();
                 bridge.emitEvent("android:copyDone",
-                        "{\"ok\":true,\"fileName\":\"" + fileName.replace("\"", "\\\"")
-                                + "\",\"deleted\":" + deleted + "}");
+                        "{\"ok\":true,\"fileName\":" + JSONObject.quote(fileName)
+                                + ",\"deleted\":" + deleted + "}");
             } catch (Exception e) {
                 Log.e(TAG, "copyToFolder failed", e);
                 bridge.emitEvent("android:copyDone",
-                        "{\"ok\":false,\"error\":\"" + e.getMessage() + "\"}");
+                        "{\"ok\":false,\"error\":"
+                                + JSONObject.quote(e.getMessage() != null ? e.getMessage() : "copy failed") + "}");
             }
         }).start();
     }

@@ -9,19 +9,19 @@ const { selected, select } = useDiscovery()
 </script>
 
 <template>
-  <div class="flex h-full">
+  <div class="flex h-full min-h-0">
     <!-- Device list (desktop always visible; mobile only when nothing selected) -->
     <div
-      class="w-full border-r border-white/5 bg-surface-0/40 p-5 md:w-80 md:shrink-0 md:p-6"
+      class="w-full overflow-y-auto border-r border-white/5 bg-surface-0/40 p-4 sm:p-5 md:w-[18rem] md:shrink-0 md:p-5 lg:w-64 lg:p-6"
       :class="selected ? 'hidden md:block' : 'block'"
     >
       <DeviceList />
     </div>
 
     <!-- Transfer area -->
-    <div class="flex-1" :class="selected ? 'block' : 'hidden md:block'">
+    <div class="min-w-0 flex-1" :class="selected ? 'block' : 'hidden md:block'">
       <div v-if="selected" class="flex h-full flex-col">
-        <div class="flex items-center gap-2 border-b border-white/5 px-4 py-3 md:hidden">
+        <div class="flex min-h-14 items-center gap-2 border-b border-white/5 px-4 py-3 md:hidden">
           <button class="btn-ghost px-2" @click="select(selected.id)" aria-label="Back">
             <Icon name="back" />
           </button>

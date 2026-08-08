@@ -50,9 +50,9 @@ const hasTransfers = computed(() => transfers.value.length > 0)
 </script>
 
 <template>
-  <div class="flex h-full flex-col gap-5 p-4 sm:p-5 md:p-8">
+  <div class="flex h-full min-h-0 flex-col gap-4 p-4 sm:gap-5 sm:p-6 lg:p-8 xl:p-10">
     <div
-      class="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/10 bg-surface-0/30 px-4 py-8 text-center transition hover:border-accent/40 hover:bg-accent-soft/30 sm:px-6 sm:py-12"
+      class="drop-zone flex min-h-44 cursor-pointer touch-manipulation flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/10 bg-surface-0/30 px-4 py-8 text-center transition hover:border-accent/40 hover:bg-accent-soft/30 sm:min-h-52 sm:px-6 sm:py-12"
       :class="dragOver ? 'border-accent bg-accent-soft' : ''"
       @click="pickFiles"
       @dragover.prevent="dragOver = true"
@@ -62,11 +62,11 @@ const hasTransfers = computed(() => transfers.value.length > 0)
       <div class="mb-3 grid h-12 w-12 place-items-center rounded-full bg-surface-2 text-accent sm:h-14 sm:w-14">
         <Icon name="upload" :size="24" />
       </div>
-      <p class="min-w-0 font-medium">Drop files or click to browse</p>
-      <p class="min-w-0 text-sm text-content-faint">Sending to {{ device.name }}</p>
+      <p class="min-w-0 max-w-full truncate font-medium">Drop files or click to browse</p>
+      <p class="min-w-0 max-w-full truncate text-sm text-content-faint">Sending to {{ device.name }}</p>
     </div>
 
-    <div class="flex-1 overflow-auto">
+    <div class="min-h-0 flex-1 overflow-y-auto pr-0.5">
       <p v-if="!hasTransfers" class="grid h-full place-items-center text-sm text-content-faint">No transfers yet</p>
       <div v-else class="flex flex-col gap-2">
         <FileRow
