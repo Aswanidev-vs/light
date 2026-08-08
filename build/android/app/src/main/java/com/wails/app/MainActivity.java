@@ -39,6 +39,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.FileProvider;
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -97,6 +98,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        cleanupOldPickerCache();
 
         acquireDiscoveryMulticastLock();
 
@@ -485,6 +488,7 @@ public class MainActivity extends AppCompatActivity {
      */
     public void copyToFolder(final String json) {
         new Thread(() -> {
+            Uri createdDocument = null;
             try {
                 JSONObject o = new JSONObject(json);
                 Uri treeUri = Uri.parse(o.getString("uri"));
@@ -512,18 +516,16 @@ public class MainActivity extends AppCompatActivity {
                         .getMimeTypeFromExtension(fileName.contains(".")
                                 ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase()
                                 : "");
-                Uri docUri = DocumentsContract.createDocument(getContentResolver(),
+                createdDocument = DocumentsContract.createDocument(getContentResolver(),
                         parentDocumentUri, mime != null ? mime : "application/octet-stream", fileName);
-                if (docUri == null) {
+                if (createdDocument == null) {
                     throw new IllegalStateException("could not create destination file");
                 }
 
                 try (InputStream in = new FileInputStream(source);
-                     OutputStream out = getContentResolver().openOutputStream(docUri)) {
+                     OutputStream out = getContentResolver().openOutputStream(createdDocument)) {
                     if (out == null) {
-                        bridge.emitEvent("android:copyDone",
-                                "{\"ok\":false,\"error\":" + JSONObject.quote("cannot open destination") + "}");
-                        return;
+                        throw new IllegalStateException("cannot open destination");
                     }
                     byte[] buf = new byte[64 * 1024];
                     int n;
@@ -537,12 +539,69 @@ public class MainActivity extends AppCompatActivity {
                         "{\"ok\":true,\"fileName\":" + JSONObject.quote(fileName)
                                 + ",\"deleted\":" + deleted + "}");
             } catch (Exception e) {
+                if (createdDocument != null) {
+                    try {
+                        DocumentsContract.deleteDocument(getContentResolver(), createdDocument);
+                    } catch (Exception cleanupError) {
+                        Log.w(TAG, "Unable to remove failed destination document", cleanupError);
+                    }
+                }
                 Log.e(TAG, "copyToFolder failed", e);
                 bridge.emitEvent("android:copyDone",
                         "{\"ok\":false,\"error\":"
                                 + JSONObject.quote(e.getMessage() != null ? e.getMessage() : "copy failed") + "}");
             }
         }).start();
+    }
+
+    /** Remove selected-file cache entries after a send succeeds or fails. */
+    public void cleanupPickedFiles(final String json) {
+        new Thread(() -> {
+            try {
+                JSONArray paths = new JSONArray(json);
+                File root = new File(getCacheDir(), "wails-picker").getCanonicalFile();
+                for (int i = 0; i < paths.length(); i++) {
+                    String raw = paths.optString(i, "");
+                    if (raw.isEmpty()) continue;
+                    File candidate = new File(raw).getCanonicalFile();
+                    String rootPrefix = root.getPath() + File.separator;
+                    if (!candidate.getPath().startsWith(rootPrefix)) continue;
+                    deleteRecursively(candidate);
+                    File parent = candidate.getParentFile();
+                    File[] siblings = parent == null ? null : parent.listFiles();
+                    if (parent != null && parent.getCanonicalPath().startsWith(rootPrefix)
+                            && parent.isDirectory() && siblings != null && siblings.length == 0) {
+                        parent.delete();
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Unable to clean picked-file cache", e);
+            }
+        }).start();
+    }
+
+    private void cleanupOldPickerCache() {
+        File root = new File(getCacheDir(), "wails-picker");
+        File[] entries = root.listFiles();
+        if (entries == null) return;
+        long cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L;
+        for (File entry : entries) {
+            if (entry.lastModified() < cutoff) {
+                deleteRecursively(entry);
+            }
+        }
+    }
+
+    private static void deleteRecursively(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteRecursively(child);
+                }
+            }
+        }
+        file.delete();
     }
 
     /** Downscale a captured photo into a base64 JPEG data URL for display in the webview. */
@@ -794,8 +853,8 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception ignored) {
         }
 
+        File dir = new File(getCacheDir(), "wails-picker/" + System.nanoTime());
         try {
-            File dir = new File(getCacheDir(), "wails-picker/" + System.nanoTime());
             if (!dir.mkdirs()) {
                 return null;
             }
@@ -803,6 +862,7 @@ public class MainActivity extends AppCompatActivity {
             try (InputStream in = getContentResolver().openInputStream(uri);
                  OutputStream os = new FileOutputStream(out)) {
                 if (in == null) {
+                    deleteRecursively(dir);
                     return null;
                 }
                 byte[] buf = new byte[64 * 1024];
@@ -813,6 +873,7 @@ public class MainActivity extends AppCompatActivity {
             }
             return out.getAbsolutePath();
         } catch (Exception e) {
+            deleteRecursively(dir);
             Log.e(TAG, "Failed to copy picked document", e);
             return null;
         }

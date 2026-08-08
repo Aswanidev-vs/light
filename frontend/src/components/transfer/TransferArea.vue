@@ -43,6 +43,10 @@ async function send(paths: string[]) {
     })
   } catch (e: any) {
     toast(e?.message || 'Send failed', 'error')
+  } finally {
+    if (typeof window !== 'undefined' && (window as any).wails?.platform?.() === 'android') {
+      ;(window as any).wails.cleanupPickedFiles?.(JSON.stringify(paths))
+    }
   }
 }
 

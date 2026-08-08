@@ -23,6 +23,8 @@ import (
 
 const chunkSize = 1 << 20 // 1MB
 
+const partialFileMaxAge = 24 * time.Hour
+
 type acceptState struct {
 	status string // pending | accepted | rejected | cancelled
 }
@@ -257,19 +259,30 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	path := uniquePath(filepath.Join(dl, sanitize(fname)))
+	partialPath := path + ".light-partial-" + sanitize(tid)
 	// Record the real destination the user chose. On mobile the file is first
 	// written to an app-internal staging dir (SAF folders aren't raw-writable
 	// under scoped storage); the frontend then bridges the finished file into
 	// the chosen folder via the SAF tree URI.
 	dest := s.settings.GetSettings().DownloadDir
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		http.Error(w, "cannot open destination ("+dl+"): "+err.Error(), 500)
 		return
 	}
-	defer f.Close()
+	completed := false
+	defer func() {
+		_ = f.Close()
+		if !completed {
+			_ = os.Remove(partialPath)
+		}
+	}()
 	if offset > 0 {
-		_, _ = f.Seek(offset, 0)
+		if _, err := f.Seek(offset, 0); err != nil {
+			s.failTransfer(tid+":"+fname, fname, err.Error())
+			http.Error(w, "cannot seek destination: "+err.Error(), 500)
+			return
+		}
 	}
 
 	subID := tid + ":" + fname
@@ -281,9 +294,18 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	lastEmit := start
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := r.Body.Read(buf)
+		n, readErr := r.Body.Read(buf)
 		if n > 0 {
-			f.Write(buf[:n])
+			writtenBytes, writeErr := f.Write(buf[:n])
+			if writeErr != nil || writtenBytes != n {
+				errMsg := "incomplete write"
+				if writeErr != nil {
+					errMsg = writeErr.Error()
+				}
+				s.failTransfer(subID, fname, errMsg)
+				http.Error(w, "write error", 500)
+				return
+			}
 			h.Write(buf[:n])
 			written += int64(n)
 			offset += int64(n)
@@ -302,23 +324,38 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 				lastEmit = time.Now()
 			}
 		}
-		if err == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			s.failTransfer(subID, fname, err.Error())
+		if readErr != nil {
+			s.failTransfer(subID, fname, readErr.Error())
 			http.Error(w, "read error", 400)
 			return
 		}
 	}
 
-	_ = f.Sync()
+	if err := f.Sync(); err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		http.Error(w, "sync error", 500)
+		return
+	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	if sum != checksum {
 		s.failTransfer(subID, fname, "checksum mismatch")
 		http.Error(w, "checksum mismatch", 400)
 		return
 	}
+	if err := f.Close(); err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		http.Error(w, "close error", 500)
+		return
+	}
+	if err := os.Rename(partialPath, path); err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		http.Error(w, "finalize error", 500)
+		return
+	}
+	completed = true
 	s.manager.Complete(subID, path, sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
@@ -341,6 +378,7 @@ func (s *FileTransferService) receiveDir() (string, error) {
 			filepath.Join(os.TempDir(), "light-downloads"),
 		} {
 			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+				cleanupPartialFiles(dir)
 				return dir, nil
 			} else {
 				lastErr = mkErr
@@ -352,7 +390,26 @@ func (s *FileTransferService) receiveDir() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	cleanupPartialFiles(dir)
 	return dir, nil
+}
+
+func cleanupPartialFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-partialFileMaxAge)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.Contains(entry.Name(), ".light-partial-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 // ---- Sender side ----

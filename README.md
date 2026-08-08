@@ -24,6 +24,11 @@
 4. **Accept/Reject** — The receiver sees an incoming file prompt and can accept or decline. Auto-accept can be enabled in settings.
 5. **Progress** — Real-time progress, speed, and ETA are shown for every transfer. Pause, resume, and cancel are supported.
 
+Failed or interrupted receives are written to a Light-owned partial filename
+and removed automatically. Stale partial artifacts older than 24 hours are
+also pruned. On Android, temporary files created by the document picker are
+removed after sending and stale picker cache is cleaned at app startup.
+
 ## Features
 
 - **Zero Config** — Auto-discovery on LAN, no manual setup required
