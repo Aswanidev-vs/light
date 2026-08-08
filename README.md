@@ -20,9 +20,14 @@
 
 1. **Discovery** — Devices broadcast their presence via UDP beacons on the local network (port 9129). Each device periodically sends a JSON heartbeat containing its ID, name, type, and transfer port. Other devices listen and maintain a live device table with a 10-second TTL.
 2. **Pairing** — Scan a QR code or enter a 6-digit code to connect devices across subnets, or when auto-discovery doesn't reach them.
-3. **Transfer** — The sender streams files over plain HTTP/TCP to the receiver's device. Each file is hashed while it is being read, and the receiver returns its computed SHA-256 digest after the write completes.
+3. **Transfer** — The sender streams files over plain HTTP/TCP by default. The optional QUIC setting tries HTTP/3 first and falls back to TCP before any file body is sent. Each file is sent with a SHA-256 checksum header for integrity verification.
 4. **Accept/Reject** — The receiver sees an incoming file prompt and can accept or decline. Auto-accept can be enabled in settings.
-5. **Progress** — Real-time progress, speed, and ETA are shown for every transfer. Pause, resume, and cancel are supported. Up to four files can transfer concurrently.
+5. **Progress** — Real-time progress, speed, and ETA are shown for every transfer. Pause, resume, and cancel are supported.
+
+Failed or interrupted receives are written to a Light-owned partial filename
+and removed automatically. Stale partial artifacts older than 24 hours are
+also pruned. On Android, temporary files created by the document picker are
+removed after sending and stale picker cache is cleaned at app startup.
 
 ## Features
 
@@ -31,11 +36,31 @@
 - **QR Pairing** — Scan a QR code or enter a 6-digit code to connect devices
 - **Real-time Progress** — Live speed, ETA, and per-file progress tracking
 - **Pause / Resume / Cancel** — Full transfer control at any time
-- **High-throughput LAN Transfers** — One-pass file streaming, connection reuse, and up to four concurrent files
-- **End-to-end Integrity** — Sender and receiver compare SHA-256 digests after each file completes
 - **Accept / Reject** — Incoming files require consent (or auto-accept)
 - **Transfer History** — Completed and failed transfers are logged
 - **Dark Theme** — Industrial-utilitarian design with amber accents
+
+## Experimental QUIC transport
+
+TCP remains the stable default. The `quic` transport setting probes HTTP/3
+over UDP on the transfer port and falls back to TCP before any file body is
+sent when the peer does not support QUIC or UDP is unavailable.
+
+QUIC mode is opt-in and should be enabled on each peer that should accept
+HTTP/3. It uses an ephemeral self-signed certificate: traffic is encrypted,
+but peer identity is not authenticated yet. TCP remains the recommended
+default.
+
+Direct Wi-Fi/Android Wi-Fi Direct and Windows Wi-Fi Direct adapters are not
+part of the current transport mode. The app can still use a manually created
+hotspot or Wi-Fi Direct network when the devices receive reachable LAN
+addresses; native connection management is a separate platform integration.
+
+To compare the local transport paths:
+
+```bash
+go test ./internal/light -run '^$' -bench '^BenchmarkTransferTransport$' -benchtime=1s
+```
 
 ## Tech Stack
 
@@ -44,22 +69,9 @@
 | Backend | Go 1.25 + Wails v3 |
 | Frontend | Vue 3 + TypeScript + Vite 8 + Tailwind CSS 3 |
 | Discovery | UDP broadcast beacons (port 9129) |
-| Transfer | Plain HTTP over TCP (port 9120, configurable) |
+| Transfer | Plain HTTP/TCP (port 9120, configurable) with optional HTTP/3 over QUIC |
 | History | JSON file (`~/.light/history.json`) |
 | QR | [skip2/go-qrcode](https://github.com/skip2/go-qrcode) + jsQR (browser) |
-
-## Transfer Performance and Compatibility
-
-Light uses the existing local HTTP/TCP connection on all supported platforms. The current transfer engine is optimized without adding protocol dependencies or requiring platform-specific networking APIs:
-
-- The sender reads each file once and computes SHA-256 while streaming it to the receiver.
-- The receiver hashes and writes with a 1 MB streaming buffer, then performs one sync after the file completes.
-- A shared HTTP transport reuses connections and supports up to four concurrent file uploads.
-- One failed file is reported independently; other files in the same batch continue transferring.
-- Pause, resume, and cancel remain scoped to each individual file.
-- The receiver returns `ok <sha256>` after a successful write, and the sender verifies that digest before marking the transfer complete.
-
-This is a LAN-only plain HTTP transport and does not currently use TLS, QUIC, Wi-Fi Direct, or mobile hotspot mode. Actual throughput depends on the Wi-Fi/Ethernet link, router congestion, device storage, and Android storage providers. For digest verification, both devices should run compatible current builds.
 
 ## Project Structure
 
@@ -70,6 +82,8 @@ internal/light/              Go backend package
   settings.go                SettingsService — config persistence + device ID
   discovery.go               DiscoveryService — UDP beacon broadcast + Diagnostics
   filetransfer.go            FileTransferService — HTTP server + sender upload
+  quic.go                    Experimental HTTP/3 server/client + TCP fallback
+  transport_bench_test.go    Local TCP-versus-QUIC integration test and benchmark
   transfermanager.go         TransferManager — progress tracking + JSON history
   qr.go                      QRCodeService — QR generation + pairing codes
   broadcast_windows.go       SO_BROADCAST (Windows, syscall)
@@ -137,7 +151,8 @@ Settings are stored in `~/.light/settings.json`:
   "downloadDir": "~/Downloads/Light",
   "autoAccept": false,
   "theme": "dark",
-  "enableEncryption": false
+  "enableEncryption": false,
+  "transportMode": "tcp"
 }
 ```
 
@@ -148,6 +163,7 @@ Settings are stored in `~/.light/settings.json`:
 | `downloadDir` | `~/Downloads/Light` | Where received files are saved |
 | `autoAccept` | false | Accept incoming files without prompting |
 | `theme` | dark | UI theme (dark only for now) |
+| `transportMode` | tcp | `tcp` for the stable path, or `quic` to try HTTP/3 first and fall back to TCP |
 
 ## Architecture
 
@@ -183,17 +199,6 @@ The old mDNS-based discovery was replaced with a simpler, more reliable **UDP be
 - **Receive**: Wildcard UDP socket on `0.0.0.0:9129`
 - **Device ID**: Persisted `crypto/rand` UUID in `~/.light/deviceid` (never derived from a cert, never a constant)
 - **Diagnostics**: `Diagnostics()` RPC + loopback self-test separates "socket broken" vs "packets not crossing network" vs "peer not answering"
-
-## Verification
-
-Run the following checks before submitting changes:
-
-```bash
-go test ./...
-go test -race ./internal/light
-go vet ./...
-cd frontend && npm run build
-```
 
 ## License
 

@@ -21,22 +21,9 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-const (
-	chunkSize            = 1 << 20 // 1MB
-	maxConcurrentUploads = 4
-)
+const chunkSize = 1 << 20 // 1MB
 
-var fileTransferHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        8,
-		MaxIdleConnsPerHost: 8,
-		IdleConnTimeout:     90 * time.Second,
-		WriteBufferSize:     64 << 10,
-		ReadBufferSize:      64 << 10,
-		DisableCompression:  true,
-	},
-	Timeout: 0,
-}
+const partialFileMaxAge = 24 * time.Hour
 
 type acceptState struct {
 	status string // pending | accepted | rejected | cancelled
@@ -58,12 +45,16 @@ type FileTransferService struct {
 	settings  *SettingsService
 	discovery *DiscoveryService
 
-	mu       sync.Mutex
-	server   *http.Server
-	ln       net.Listener
-	mux      *http.ServeMux
-	accepts  map[string]*acceptState
-	controls map[string]*sendControl
+	mu         sync.Mutex
+	server     *http.Server
+	ln         net.Listener
+	mux        *http.ServeMux
+	quic       quicHTTP3Server
+	quicConn   net.PacketConn
+	quicClient *http.Client
+	quicClose  func()
+	accepts    map[string]*acceptState
+	controls   map[string]*sendControl
 }
 
 func NewFileTransferService(app *application.App, manager *TransferManager, settings *SettingsService, discovery *DiscoveryService) *FileTransferService {
@@ -92,16 +83,43 @@ func (s *FileTransferService) StartServer() error {
 	mux.HandleFunc("/api/prepare", s.handlePrepare)
 	mux.HandleFunc("/api/transfer", s.handleTransfer)
 	mux.HandleFunc("/api/status/", s.handleStatus)
+	mux.HandleFunc("/api/capabilities", s.handleCapabilities)
 	s.mux = mux
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
+
+	var quicServer quicHTTP3Server
+	var quicConn net.PacketConn
+	if normalizeTransportMode(s.settings.GetSettings().TransportMode) == "quic" {
+		quicServer, err = newQUICServer(fmt.Sprintf(":%d", port), mux)
+		if err == nil {
+			quicConn, err = net.ListenPacket("udp", fmt.Sprintf(":%d", port))
+		}
+		if err != nil {
+			// Keep the stable TCP listener alive when UDP/QUIC is unavailable.
+			// Outgoing peers will fail the QUIC probe and use TCP instead.
+			if quicConn != nil {
+				_ = quicConn.Close()
+			}
+			quicServer = nil
+			quicConn = nil
+			err = nil
+		}
+	}
 	s.ln = ln
 	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
+	s.quic = quicServer
+	s.quicConn = quicConn
 	s.mu.Unlock()
 	go s.server.Serve(ln)
+	if quicServer != nil {
+		go func() {
+			_ = quicServer.Serve(quicConn)
+		}()
+	}
 	return nil
 }
 
@@ -113,15 +131,31 @@ func (s *FileTransferService) StopServer() {
 	if s.ln != nil {
 		_ = s.ln.Close()
 	}
+	if s.quic != nil {
+		_ = s.quic.Close()
+	}
+	if s.quicConn != nil {
+		_ = s.quicConn.Close()
+	}
+	if s.quicClose != nil {
+		s.quicClose()
+	}
 	s.ln = nil
 	s.server = nil
+	s.quic = nil
+	s.quicConn = nil
+	s.quicClient = nil
+	s.quicClose = nil
 	s.mu.Unlock()
 }
 
-func (s *FileTransferService) RestartServer() {
+func (s *FileTransferService) RestartServer() error {
 	s.StopServer()
-	_ = s.StartServer()
+	if err := s.StartServer(); err != nil {
+		return err
+	}
 	s.emitSettings()
+	return nil
 }
 
 // ---- Receiver-side handlers ----
@@ -187,6 +221,18 @@ func (s *FileTransferService) handleStatus(w http.ResponseWriter, r *http.Reques
 	w.Write([]byte(st.status))
 }
 
+func (s *FileTransferService) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"transport":   "quic",
+		"tcpFallback": true,
+	})
+}
+
 func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -196,6 +242,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	fname := r.Header.Get("X-Filename")
 	size := atoi64(r.Header.Get("X-File-Size"))
 	offset := atoi64(r.Header.Get("X-Offset"))
+	checksum := r.Header.Get("X-Checksum-Sha256")
 
 	s.mu.Lock()
 	st := s.accepts[tid]
@@ -212,23 +259,30 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	path := uniquePath(filepath.Join(dl, sanitize(fname)))
+	partialPath := path + ".light-partial-" + sanitize(tid)
 	// Record the real destination the user chose. On mobile the file is first
 	// written to an app-internal staging dir (SAF folders aren't raw-writable
 	// under scoped storage); the frontend then bridges the finished file into
 	// the chosen folder via the SAF tree URI.
 	dest := s.settings.GetSettings().DownloadDir
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		http.Error(w, "cannot open destination ("+dl+"): "+err.Error(), 500)
 		return
 	}
-	defer f.Close()
-	cleanup := func() {
+	completed := false
+	defer func() {
 		_ = f.Close()
-		_ = os.Remove(path)
-	}
+		if !completed {
+			_ = os.Remove(partialPath)
+		}
+	}()
 	if offset > 0 {
-		_, _ = f.Seek(offset, 0)
+		if _, err := f.Seek(offset, 0); err != nil {
+			s.failTransfer(tid+":"+fname, fname, err.Error())
+			http.Error(w, "cannot seek destination: "+err.Error(), 500)
+			return
+		}
 	}
 
 	subID := tid + ":" + fname
@@ -238,20 +292,17 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	var written int64
 	start := time.Now()
 	lastEmit := start
-	buf := make([]byte, chunkSize)
+	buf := make([]byte, 32*1024)
 	for {
-		n, err := r.Body.Read(buf)
+		n, readErr := r.Body.Read(buf)
 		if n > 0 {
-			writtenN, writeErr := f.Write(buf[:n])
-			if writeErr != nil {
-				cleanup()
-				s.failTransfer(subID, fname, writeErr.Error())
-				http.Error(w, "write error", 500)
-				return
-			}
-			if writtenN != n {
-				cleanup()
-				s.failTransfer(subID, fname, io.ErrShortWrite.Error())
+			writtenBytes, writeErr := f.Write(buf[:n])
+			if writeErr != nil || writtenBytes != n {
+				errMsg := "incomplete write"
+				if writeErr != nil {
+					errMsg = writeErr.Error()
+				}
+				s.failTransfer(subID, fname, errMsg)
 				http.Error(w, "write error", 500)
 				return
 			}
@@ -273,24 +324,38 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 				lastEmit = time.Now()
 			}
 		}
-		if err == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			cleanup()
-			s.failTransfer(subID, fname, err.Error())
+		if readErr != nil {
+			s.failTransfer(subID, fname, readErr.Error())
 			http.Error(w, "read error", 400)
 			return
 		}
 	}
 
 	if err := f.Sync(); err != nil {
-		cleanup()
-		s.failTransfer(subID, fname, "sync error")
+		s.failTransfer(subID, fname, err.Error())
 		http.Error(w, "sync error", 500)
 		return
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
+	if sum != checksum {
+		s.failTransfer(subID, fname, "checksum mismatch")
+		http.Error(w, "checksum mismatch", 400)
+		return
+	}
+	if err := f.Close(); err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		http.Error(w, "close error", 500)
+		return
+	}
+	if err := os.Rename(partialPath, path); err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		http.Error(w, "finalize error", 500)
+		return
+	}
+	completed = true
 	s.manager.Complete(subID, path, sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
@@ -299,7 +364,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		})
 	}
 	w.WriteHeader(200)
-	w.Write([]byte("ok " + sum))
+	w.Write([]byte("ok"))
 }
 
 // receiveDir returns the directory the receiver writes incoming files to. On
@@ -313,6 +378,7 @@ func (s *FileTransferService) receiveDir() (string, error) {
 			filepath.Join(os.TempDir(), "light-downloads"),
 		} {
 			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+				cleanupPartialFiles(dir)
 				return dir, nil
 			} else {
 				lastErr = mkErr
@@ -324,7 +390,26 @@ func (s *FileTransferService) receiveDir() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	cleanupPartialFiles(dir)
 	return dir, nil
+}
+
+func cleanupPartialFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-partialFileMaxAge)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.Contains(entry.Name(), ".light-partial-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 // ---- Sender side ----
@@ -340,7 +425,11 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		if err != nil {
 			continue
 		}
-		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size()})
+		sum, err := sha256File(p)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size(), Checksum: sum})
 		paths = append(paths, p)
 	}
 	if len(entries) == 0 {
@@ -349,8 +438,13 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 
 	tid := newID()
 	p := PreparePayload{TransferID: tid, SenderName: s.settings.GetSettings().DeviceName, Files: entries}
+	client, scheme, closeClient, err := s.clientForPeer(req.DeviceAddr)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
 	body, _ := json.Marshal(p)
-	resp, err := fileTransferHTTPClient.Post("http://"+req.DeviceAddr+"/api/prepare", "application/json", bytes.NewReader(body))
+	resp, err := client.Post(scheme+"://"+req.DeviceAddr+"/api/prepare", "application/json", bytes.NewReader(body))
 	if err != nil {
 		for _, e := range entries {
 			s.failTransfer(tid+":"+e.Name, e.Name, err.Error())
@@ -368,7 +462,7 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		return fmt.Errorf("rejected by receiver")
 	}
 	if status == "pending" {
-		if !s.waitAccept(req.DeviceAddr, tid) {
+		if !s.waitAccept(req.DeviceAddr, tid, client, scheme) {
 			for _, e := range entries {
 				s.failTransfer(tid+":"+e.Name, e.Name, "rejected or timed out")
 			}
@@ -376,64 +470,19 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		}
 	}
 
-	type uploadJob struct {
-		path  string
-		entry FileManifestEntry
-	}
-	jobs := make(chan uploadJob)
-	errs := make(chan error, len(paths))
-	nameLocks := make(map[string]*sync.Mutex)
-	var nameLocksMu sync.Mutex
-	getNameLock := func(name string) *sync.Mutex {
-		nameLocksMu.Lock()
-		defer nameLocksMu.Unlock()
-		if lock, ok := nameLocks[name]; ok {
-			return lock
+	for i, p2 := range paths {
+		if err := s.uploadWithClient(tid, req.DeviceAddr, p2, entries[i].Name, entries[i].Size, entries[i].Checksum, client, scheme); err != nil {
+			return err
 		}
-		lock := &sync.Mutex{}
-		nameLocks[name] = lock
-		return lock
 	}
-
-	workerCount := maxConcurrentUploads
-	if len(paths) < workerCount {
-		workerCount = len(paths)
-	}
-	var workers sync.WaitGroup
-	workers.Add(workerCount)
-	for i := 0; i < workerCount; i++ {
-		go func() {
-			defer workers.Done()
-			for job := range jobs {
-				nameLock := getNameLock(job.entry.Name)
-				nameLock.Lock()
-				err := s.upload(tid, req.DeviceAddr, job.path, job.entry.Name, job.entry.Size)
-				nameLock.Unlock()
-				if err != nil {
-					errs <- fmt.Errorf("%s: %w", job.entry.Name, err)
-				}
-			}
-		}()
-	}
-	for i, path := range paths {
-		jobs <- uploadJob{path: path, entry: entries[i]}
-	}
-	close(jobs)
-	workers.Wait()
-	close(errs)
-
-	var uploadErrors []error
-	for err := range errs {
-		uploadErrors = append(uploadErrors, err)
-	}
-	return errors.Join(uploadErrors...)
+	return nil
 }
 
-func (s *FileTransferService) waitAccept(peerAddr, tid string) bool {
+func (s *FileTransferService) waitAccept(peerAddr, tid string, client *http.Client, scheme string) bool {
 	deadline := time.Now().Add(2 * time.Minute)
-	url := "http://" + peerAddr + "/api/status/" + tid
+	url := scheme + "://" + peerAddr + "/api/status/" + tid
 	for time.Now().Before(deadline) {
-		resp, err := fileTransferHTTPClient.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -449,7 +498,7 @@ func (s *FileTransferService) waitAccept(peerAddr, tid string) bool {
 	return false
 }
 
-func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size int64) error {
+func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname string, size int64, sum string, client *http.Client, scheme string) error {
 	subID := tid + ":" + fname
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := &sendControl{status: StatusActive, resumeCh: make(chan struct{})}
@@ -477,13 +526,12 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 	}
 	defer f.Close()
 
-	h := sha256.New()
 	cr := &countingReader{
-		r: io.TeeReader(f, h), ctrl: ctrl, subID: subID, fname: fname, size: size,
+		r: f, ctrl: ctrl, subID: subID, fname: fname, size: size,
 		started: time.Now(), lastEmit: time.Now(), app: s.app, manager: s.manager,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+peerAddr+"/api/transfer", cr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, scheme+"://"+peerAddr+"/api/transfer", cr)
 	if err != nil {
 		s.failTransfer(subID, fname, err.Error())
 		return err
@@ -492,9 +540,10 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 	req.Header.Set("X-Filename", fname)
 	req.Header.Set("X-File-Size", strconv.FormatInt(size, 10))
 	req.Header.Set("X-Offset", "0")
+	req.Header.Set("X-Checksum-Sha256", sum)
 	req.ContentLength = size
 
-	resp, err := fileTransferHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.manager.Cancel(subID)
@@ -505,33 +554,17 @@ func (s *FileTransferService) upload(tid, peerAddr, filePath, fname string, size
 		return err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		s.failTransfer(subID, fname, err.Error())
-		return err
-	}
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		errMsg := fmt.Sprintf("receiver error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		s.failTransfer(subID, fname, errMsg)
 		return errors.New(errMsg)
 	}
 
-	receivedSum, err := transferResponseChecksum(respBody)
-	if err != nil {
-		s.failTransfer(subID, fname, err.Error())
-		return err
-	}
-	sentSum := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(receivedSum, sentSum) {
-		err = errors.New("checksum mismatch")
-		s.failTransfer(subID, fname, err.Error())
-		return err
-	}
-
-	s.manager.Complete(subID, "", sentSum)
+	s.manager.Complete(subID, "", sum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
-			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": sentSum,
+			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": sum,
 		})
 	}
 	return nil
@@ -697,15 +730,17 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func transferResponseChecksum(body []byte) (string, error) {
-	fields := strings.Fields(string(body))
-	if len(fields) != 2 || fields[0] != "ok" || len(fields[1]) != sha256.Size*2 {
-		return "", errors.New("invalid transfer response")
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
-	if _, err := hex.DecodeString(fields[1]); err != nil {
-		return "", errors.New("invalid transfer response")
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
 	}
-	return strings.ToLower(fields[1]), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func atoi64(s string) int64 {

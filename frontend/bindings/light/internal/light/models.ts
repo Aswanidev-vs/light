@@ -118,6 +118,12 @@ export class Settings {
     "theme": string;
     "enableEncryption": boolean;
 
+    /**
+     * TransportMode controls outgoing transport selection. TCP is the stable
+     * default; QUIC probes HTTP/3 first and falls back to TCP before uploading.
+     */
+    "transportMode": string;
+
     /** Creates a new Settings instance. */
     constructor($$source: Partial<Settings> = {}) {
         if (!("deviceName" in $$source)) {
@@ -140,6 +146,9 @@ export class Settings {
         }
         if (!("enableEncryption" in $$source)) {
             this["enableEncryption"] = false;
+        }
+        if (!("transportMode" in $$source)) {
+            this["transportMode"] = "tcp";
         }
 
         Object.assign(this, $$source);

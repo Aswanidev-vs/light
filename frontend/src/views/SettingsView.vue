@@ -2,6 +2,7 @@
 import { ref, watch, onUnmounted } from 'vue'
 import { useSettings } from '../composables/useSettings'
 import { SettingsService } from '../../bindings/light/internal/light'
+import { RestartServer } from '../../bindings/light/internal/light/filetransferservice'
 import { useUI } from '../composables/useUI'
 import { Events } from '@wailsio/runtime'
 import Icon from '../components/common/Icon.vue'
@@ -16,7 +17,11 @@ watch(settings, () => {
 
 async function save() {
   try {
+    const transportChanged = local.value.transportMode !== settings.value.transportMode
     await SettingsService.UpdateSettings(local.value)
+    if (transportChanged) {
+      await RestartServer()
+    }
     toast('Settings saved', 'success')
   } catch {
     toast('Failed to save settings', 'error')
@@ -129,6 +134,30 @@ onUnmounted(() => {
           max="65535"
           class="field-input w-full sm:w-32"
         />
+      </div>
+
+      <!-- Experimental transport -->
+      <div class="rounded-lg border border-accent/20 bg-accent/5 p-4">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <label class="field-label mb-1">Experimental transport</label>
+            <div class="text-xs leading-relaxed text-content-faint">
+              TCP is the stable default. QUIC tries HTTP/3 first and falls back to TCP before a transfer starts.
+            </div>
+          </div>
+          <button
+            class="toggle shrink-0"
+            :class="local.transportMode === 'quic' ? 'toggle--on' : ''"
+            :aria-pressed="local.transportMode === 'quic'"
+            aria-label="Toggle experimental QUIC transport"
+            @click="local.transportMode = local.transportMode === 'quic' ? 'tcp' : 'quic'"
+          >
+            <span
+              class="toggle-thumb"
+              :class="local.transportMode === 'quic' ? 'toggle-thumb--on' : ''"
+            />
+          </button>
+        </div>
       </div>
 
       <!-- Auto accept -->

@@ -65,8 +65,8 @@ type FileManifestEntry struct {
 }
 
 type PreparePayload struct {
-	TransferID string             `json:"transferId"`
-	SenderName string             `json:"senderName"`
+	TransferID string              `json:"transferId"`
+	SenderName string              `json:"senderName"`
 	Files      []FileManifestEntry `json:"files"`
 }
 
@@ -84,4 +84,7 @@ type Settings struct {
 	AutoAccept       bool   `json:"autoAccept"`
 	Theme            string `json:"theme"`
 	EnableEncryption bool   `json:"enableEncryption"`
+	// TransportMode controls outgoing transport selection. TCP is the stable
+	// default; QUIC probes HTTP/3 first and falls back to TCP before uploading.
+	TransportMode string `json:"transportMode"`
 }

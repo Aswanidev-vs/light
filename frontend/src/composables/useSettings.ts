@@ -11,6 +11,7 @@ const settings = ref<Settings>({
   autoAccept: false,
   theme: 'dark',
   enableEncryption: false,
+  transportMode: 'tcp',
 })
 
 let inited = false
