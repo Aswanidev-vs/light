@@ -113,8 +113,9 @@ jobs:
       - name: Package Windows installer (Inno Setup)
         working-directory: build/windows
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.installer_version }}" installer.iss
-        shell: bash
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.installer_version }}" "installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: pwsh
 
       - name: Find Windows artifacts
         id: find-win
