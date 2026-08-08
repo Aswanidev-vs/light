@@ -2,7 +2,9 @@
 ; Download Inno Setup: https://jrsoftware.org/isinfo.php
 
 #define MyAppName "Light"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "Light"
 #define MyAppURL "https://github.com/Aswanidev-vs/light"
 #define MyAppExeName "light.exe"
@@ -18,7 +20,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-OutputDir=..\..\..\bin
+OutputDir=..\..\bin
 OutputBaseFilename=light-installer
 Compression=lzma2/ultra64
 SolidCompression=yes
