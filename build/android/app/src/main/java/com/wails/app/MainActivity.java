@@ -64,6 +64,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int FILE_PICKER_REQUEST = 7001;
     private static final int WEB_FILE_PICKER_REQUEST = 7004;
     private static final int FOLDER_PICKER_REQUEST = 7005;
+    private static final int FILE_COPY_BUFFER_SIZE = 1 << 20;
 
     private WebView webView;
     private WailsBridge bridge;
@@ -527,7 +528,7 @@ public class MainActivity extends AppCompatActivity {
                     if (out == null) {
                         throw new IllegalStateException("cannot open destination");
                     }
-                    byte[] buf = new byte[64 * 1024];
+                    byte[] buf = new byte[FILE_COPY_BUFFER_SIZE];
                     int n;
                     while ((n = in.read(buf)) > 0) {
                         out.write(buf, 0, n);
@@ -865,7 +866,7 @@ public class MainActivity extends AppCompatActivity {
                     deleteRecursively(dir);
                     return null;
                 }
-                byte[] buf = new byte[64 * 1024];
+                byte[] buf = new byte[FILE_COPY_BUFFER_SIZE];
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     os.write(buf, 0, n);

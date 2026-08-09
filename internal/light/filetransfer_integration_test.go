@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +48,7 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 		SenderName: "integration sender",
 		SenderAddr: "192.168.1.10:9120",
 		SenderType: DeviceTypeDesktop,
-		Files:      []FileManifestEntry{{Name: filename, Size: int64(len(payload)), Checksum: checksum}},
+		Files:      []FileManifestEntry{{Name: filename, Size: int64(len(payload))}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +73,6 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 	transferRequest.Header.Set("X-Transfer-Id", transferID)
 	transferRequest.Header.Set("X-Filename", filename)
 	transferRequest.Header.Set("X-File-Size", strconv.FormatInt(int64(len(payload)), 10))
-	transferRequest.Header.Set("X-Checksum-Sha256", checksum)
 	transferResponse, err := http.DefaultClient.Do(transferRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +81,13 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 	if transferResponse.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(transferResponse.Body)
 		t.Fatalf("transfer status = %d, want %d: %s", transferResponse.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+	responseBody, err := io.ReadAll(transferResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(responseBody)); got != "ok "+checksum {
+		t.Fatalf("transfer response = %q, want %q", got, "ok "+checksum)
 	}
 
 	stored, err := os.ReadFile(filepath.Join(downloadDir, filename))
@@ -128,12 +135,9 @@ func TestSendFilesUploadsInParallel(t *testing.T) {
 		defer atomic.AddInt32(&active, -1)
 
 		time.Sleep(50 * time.Millisecond)
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		if err := writeTransferReceipt(w, r); err != nil {
+			t.Error(err)
 		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -173,14 +177,15 @@ func TestSendFilesContinuesAfterPerFileFailure(t *testing.T) {
 		_, _ = w.Write([]byte("accepted"))
 	})
 	mux.HandleFunc("/api/transfer", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
 		if r.Header.Get("X-Filename") == "file-0.bin" {
+			_, _ = io.Copy(io.Discard, r.Body)
 			http.Error(w, "intentional test failure", http.StatusInternalServerError)
 			return
 		}
 		atomic.AddInt32(&completed, 1)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		if err := writeTransferReceipt(w, r); err != nil {
+			t.Error(err)
+		}
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -199,6 +204,47 @@ func TestSendFilesContinuesAfterPerFileFailure(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&completed); got != 2 {
 		t.Fatalf("successful sibling uploads = %d, want 2", got)
+	}
+}
+
+func writeTransferReceipt(w http.ResponseWriter, r *http.Request) error {
+	h := sha256.New()
+	if _, err := io.Copy(h, r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return err
+	}
+	w.WriteHeader(http.StatusOK)
+	_, err := fmt.Fprintf(w, "ok %s", hex.EncodeToString(h.Sum(nil)))
+	return err
+}
+
+func TestSendFilesRejectsReceiverChecksumMismatch(t *testing.T) {
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DeviceName: "checksum sender", Port: 9120}, id: "checksum-sender-id"}
+	service := NewFileTransferService(nil, manager, settings, nil)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("accepted"))
+	})
+	mux.HandleFunc("/api/transfer", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "ok %s", strings.Repeat("0", sha256.Size*2))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	path := filepath.Join(t.TempDir(), "checksum.bin")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SendFiles(TransferRequest{DeviceAddr: server.Listener.Addr().String(), FilePaths: []string{path}}); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("SendFiles() error = %v, want checksum mismatch", err)
 	}
 }
 

@@ -121,6 +121,12 @@ func BenchmarkTransferTransport(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(closeQUIC)
+	tcpClient := newTCPClient()
+	b.Cleanup(func() {
+		if transport, ok := tcpClient.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
+	})
 	payload := bytes.Repeat([]byte("light-transfer-benchmark-"), 1<<16)
 
 	benchmark := func(b *testing.B, client *http.Client, endpoint string) {
@@ -142,7 +148,7 @@ func BenchmarkTransferTransport(b *testing.B) {
 	}
 
 	b.Run("tcp", func(b *testing.B) {
-		benchmark(b, http.DefaultClient, tcpServer.URL+"/bench")
+		benchmark(b, tcpClient, tcpServer.URL+"/bench")
 	})
 	b.Run("quic", func(b *testing.B) {
 		benchmark(b, quicClient, "https://"+packetConn.LocalAddr().String()+"/bench")
