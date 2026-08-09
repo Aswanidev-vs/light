@@ -62,19 +62,21 @@ type FileTransferService struct {
 	quicConn   net.PacketConn
 	quicClient *http.Client
 	quicClose  func()
+	quicProbes map[string]quicProbeState
 	accepts    map[string]*acceptState
 	controls   map[string]*sendControl
 }
 
 func NewFileTransferService(app *application.App, manager *TransferManager, settings *SettingsService, discovery *DiscoveryService) *FileTransferService {
 	return &FileTransferService{
-		app:       app,
-		manager:   manager,
-		settings:  settings,
-		discovery: discovery,
-		tcpClient: newTCPClient(),
-		accepts:   make(map[string]*acceptState),
-		controls:  make(map[string]*sendControl),
+		app:        app,
+		manager:    manager,
+		settings:   settings,
+		discovery:  discovery,
+		tcpClient:  newTCPClient(),
+		accepts:    make(map[string]*acceptState),
+		controls:   make(map[string]*sendControl),
+		quicProbes: make(map[string]quicProbeState),
 	}
 }
 
@@ -110,7 +112,8 @@ func (s *FileTransferService) StartServer() error {
 	mux.HandleFunc("/api/status/", s.handleStatus)
 	mux.HandleFunc("/api/capabilities", s.handleCapabilities)
 	s.mux = mux
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	lc := socketListenConfig()
+	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -171,6 +174,7 @@ func (s *FileTransferService) StopServer() {
 	s.quicConn = nil
 	s.quicClient = nil
 	s.quicClose = nil
+	s.quicProbes = make(map[string]quicProbeState)
 	s.mu.Unlock()
 }
 

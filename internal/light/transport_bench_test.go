@@ -129,15 +129,15 @@ func BenchmarkTransferTransport(b *testing.B) {
 	})
 	payload := bytes.Repeat([]byte("light-transfer-benchmark-"), 1<<16)
 
-	benchmark := func(b *testing.B, client *http.Client, endpoint string) {
+	benchmark := func(b *testing.B, client *http.Client, endpoint string, body []byte) {
 		b.Helper()
-		b.SetBytes(int64(len(payload)))
+		b.SetBytes(int64(len(body)))
 		for i := 0; i < b.N; i++ {
-			request, err := http.NewRequest(http.MethodPut, endpoint, bytes.NewReader(payload))
+			request, err := http.NewRequest(http.MethodPut, endpoint, bytes.NewReader(body))
 			if err != nil {
 				b.Fatal(err)
 			}
-			request.ContentLength = int64(len(payload))
+			request.ContentLength = int64(len(body))
 			response, err := client.Do(request)
 			if err != nil {
 				b.Fatal(err)
@@ -147,10 +147,21 @@ func BenchmarkTransferTransport(b *testing.B) {
 		}
 	}
 
+	// 25 MiB exercises steady-state throughput; the ~1.6 MiB payload below
+	// mostly measures connection ramp-up.
+	large := bytes.Repeat([]byte("light-transfer-benchmark-"), 1<<20)
+	quicEndpoint := "https://" + packetConn.LocalAddr().String() + "/bench"
+
 	b.Run("tcp", func(b *testing.B) {
-		benchmark(b, tcpClient, tcpServer.URL+"/bench")
+		benchmark(b, tcpClient, tcpServer.URL+"/bench", payload)
 	})
 	b.Run("quic", func(b *testing.B) {
-		benchmark(b, quicClient, "https://"+packetConn.LocalAddr().String()+"/bench")
+		benchmark(b, quicClient, quicEndpoint, payload)
+	})
+	b.Run("tcp/25MiB", func(b *testing.B) {
+		benchmark(b, tcpClient, tcpServer.URL+"/bench", large)
+	})
+	b.Run("quic/25MiB", func(b *testing.B) {
+		benchmark(b, quicClient, quicEndpoint, large)
 	})
 }
