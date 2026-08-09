@@ -30,6 +30,10 @@ const (
 	progressInterval      = 200 * time.Millisecond
 )
 
+var transferBufferPool = sync.Pool{
+	New: func() any { return make([]byte, chunkSize) },
+}
+
 type acceptState struct {
 	status     string // pending | accepted | rejected | cancelled
 	senderID   string
@@ -65,6 +69,7 @@ type FileTransferService struct {
 	quicProbes map[string]quicProbeState
 	accepts    map[string]*acceptState
 	controls   map[string]*sendControl
+	cleanedDirs sync.Map
 }
 
 func NewFileTransferService(app *application.App, manager *TransferManager, settings *SettingsService, discovery *DiscoveryService) *FileTransferService {
@@ -345,7 +350,9 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		app:          s.app,
 		manager:      s.manager,
 	}
-	written, err := io.CopyBuffer(receiver, r.Body, make([]byte, chunkSize))
+	buffer := transferBufferPool.Get().([]byte)
+	defer transferBufferPool.Put(buffer)
+	written, err := io.CopyBuffer(receiver, r.Body, buffer)
 	receiver.reportProgress(true)
 	if err != nil {
 		s.failTransfer(subID, fname, err.Error())
@@ -405,8 +412,8 @@ func (s *FileTransferService) receiveDir() (string, error) {
 			filepath.Join(os.TempDir(), "light-downloads"),
 		} {
 			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
-				cleanupPartialFiles(dir)
-				return dir, nil
+			s.cleanupPartialFilesOnce(dir)
+			return dir, nil
 			} else {
 				lastErr = mkErr
 			}
@@ -417,8 +424,15 @@ func (s *FileTransferService) receiveDir() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	cleanupPartialFiles(dir)
+	s.cleanupPartialFilesOnce(dir)
 	return dir, nil
+}
+
+func (s *FileTransferService) cleanupPartialFilesOnce(dir string) {
+	if _, loaded := s.cleanedDirs.LoadOrStore(dir, struct{}{}); loaded {
+		return
+	}
+	cleanupPartialFiles(dir)
 }
 
 func cleanupPartialFiles(dir string) {
