@@ -143,7 +143,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div
-    class="fixed inset-x-0 bottom-0 top-0 z-[1100] flex items-end justify-center bg-black/50 pb-[max(1rem,env(safe-area-inset-bottom))] sm:items-center sm:p-4"
+    class="fixed inset-x-0 bottom-0 top-0 z-[1100] flex items-end justify-center bg-black/50 pb-[max(1rem,var(--app-inset-bottom))] sm:items-center sm:p-4"
     :style="{ height: viewportHeight }"
     @click.self="close"
   >

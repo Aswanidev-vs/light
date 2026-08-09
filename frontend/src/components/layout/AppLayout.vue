@@ -16,7 +16,7 @@ const nav = [
 </script>
 
 <template>
-  <div class="flex h-[100dvh] min-h-0 flex-col bg-ink-deep md:flex-row">
+  <div class="app-shell flex min-h-0 flex-col bg-ink-deep md:flex-row">
     <!-- Tablet rail / desktop sidebar -->
     <aside class="hidden w-[76px] shrink-0 flex-col border-r border-white/5 bg-surface-0 md:flex lg:w-64">
       <div class="drag-region flex min-h-20 items-center border-b border-white/5 px-3 lg:px-5">

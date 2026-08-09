@@ -5,6 +5,17 @@
 @layer base {
   :root {
     color-scheme: dark;
+    /* CSS env() is the browser fallback. Android updates these variables with
+       WindowInsets so WebView versions and navigation modes use one layout
+       contract. */
+    --app-inset-native-left: 0px;
+    --app-inset-native-top: 0px;
+    --app-inset-native-right: 0px;
+    --app-inset-native-bottom: 0px;
+    --app-inset-left: max(var(--app-inset-native-left), env(safe-area-inset-left, 0px));
+    --app-inset-top: max(var(--app-inset-native-top), env(safe-area-inset-top, 0px));
+    --app-inset-right: max(var(--app-inset-native-right), env(safe-area-inset-right, 0px));
+    --app-inset-bottom: max(var(--app-inset-native-bottom), env(safe-area-inset-bottom, 0px));
   }
 
   html,
@@ -123,13 +134,32 @@
   }
 
   .mobile-nav {
-    padding-bottom: env(safe-area-inset-bottom);
+    min-height: calc(4rem + var(--app-inset-bottom, 0px));
+    padding-right: var(--app-inset-right, 0px);
+    padding-bottom: var(--app-inset-bottom, 0px);
+    padding-left: var(--app-inset-left, 0px);
   }
 
-  /* Keep the mobile brand below status bars and display cutouts. Android's
-     native WebView also applies its system inset when edge-to-edge is active. */
+  /* Keep the mobile brand below status bars and display cutouts. */
   .mobile-header {
-    padding-top: max(0.75rem, env(safe-area-inset-top, 0px));
+    padding-top: max(0.75rem, var(--app-inset-top, 0px));
+  }
+
+  .app-shell {
+    height: 100%;
+    min-height: 100%;
+  }
+
+  @supports (height: 100svh) {
+    .app-shell {
+      min-height: 100svh;
+    }
+  }
+
+  @supports (height: 100dvh) {
+    .app-shell {
+      height: 100dvh;
+    }
   }
 
   .drop-zone {
