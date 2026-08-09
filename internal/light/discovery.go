@@ -335,6 +335,24 @@ func (d *DiscoveryService) GetDevices() []Device {
 	return out
 }
 
+// Refresh reopens discovery senders so a changed Wi-Fi or Ethernet interface
+// is picked up immediately, then announces this device on the active LANs.
+func (d *DiscoveryService) Refresh() []Device {
+	d.mu.Lock()
+	if d.closed || d.conn == nil {
+		d.mu.Unlock()
+		return d.GetDevices()
+	}
+	for _, sender := range d.senders {
+		_ = sender.Close()
+	}
+	d.senders = nil
+	d.mu.Unlock()
+
+	d.announce()
+	return d.GetDevices()
+}
+
 func (d *DiscoveryService) PairByCode(code string) *Device {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

@@ -202,6 +202,12 @@ func TestSendFilesUploadsInParallel(t *testing.T) {
 	}
 }
 
+func TestMobileParallelUploadLimit(t *testing.T) {
+	if mobileParallelUploads != 4 {
+		t.Fatalf("mobile parallel uploads = %d, want 4", mobileParallelUploads)
+	}
+}
+
 func TestSendFilesContinuesAfterPerFileFailure(t *testing.T) {
 	manager := &TransferManager{active: make(map[string]*Transfer)}
 	settings := &SettingsService{cfg: Settings{DeviceName: "failure sender", Port: 9120}, id: "failure-sender-id"}

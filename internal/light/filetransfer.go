@@ -26,7 +26,7 @@ const (
 	chunkSize             = 1 << 20 // 1 MiB receiver copy buffer
 	partialFileMaxAge     = 24 * time.Hour
 	maxParallelUploads    = 4
-	mobileParallelUploads = 2
+	mobileParallelUploads = 4
 	progressInterval      = 200 * time.Millisecond
 )
 
