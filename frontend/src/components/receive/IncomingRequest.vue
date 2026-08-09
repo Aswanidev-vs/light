@@ -28,7 +28,7 @@ async function reject() {
 <template>
   <div
     v-if="pendingReceive"
-    class="fixed inset-0 z-[1000] flex items-end justify-center bg-black/50 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:grid sm:place-items-center"
+    class="fixed inset-0 z-[1000] flex items-end justify-center bg-black/50 p-4 pb-[max(1rem,var(--app-inset-bottom))] sm:grid sm:place-items-center"
     @click.self="reject"
   >
     <div class="card max-h-[calc(100dvh-1rem)] w-full max-w-md animate-slideUp overflow-y-auto p-5">

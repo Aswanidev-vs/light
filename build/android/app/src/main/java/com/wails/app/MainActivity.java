@@ -19,6 +19,7 @@ import android.os.PowerManager;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Insets;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
@@ -50,6 +51,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * MainActivity hosts the WebView and manages the Wails application lifecycle.
@@ -68,6 +70,15 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private WailsBridge bridge;
+    // The WebView is edge-to-edge on Android 15+. Keep the inset values in CSS
+    // pixels and let the web shell reserve the space for interactive controls.
+    // Applying only the top inset as native WebView padding causes the header
+    // and bottom navigation to disagree with CSS safe-area values.
+    private float webInsetLeft;
+    private float webInsetTop;
+    private float webInsetRight;
+    private float webInsetBottom;
+    private boolean webPageLoaded;
     // Battery: system-event receivers are registered only while the activity is
     // in the foreground (onStart) and torn down in onStop, so background battery/
     // network/screen broadcasts don't wake the app.
@@ -98,6 +109,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Prevent Android from adding a contrast scrim over the app's
+            // bottom navigation when three-button navigation is enabled.
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
         setContentView(R.layout.activity_main);
 
         cleanupOldPickerCache();
@@ -138,15 +154,14 @@ public class MainActivity extends AppCompatActivity {
         webView = findViewById(R.id.webview);
         bridge.setWebView(webView);
 
-        // Android 15 enforces edge-to-edge for apps targeting SDK 35. Apply
-        // only the top system-bar inset to the WebView so the mobile header
-        // starts below the status bar without changing the bottom nav layout.
+        // Android 15 enforces edge-to-edge for apps targeting SDK 35. Keep the
+        // WebView edge-to-edge and pass the complete system-bar/cutout inset to
+        // CSS instead of applying only the top inset as view padding. Partial
+        // native padding makes the mobile header and bottom nav inconsistent
+        // across gesture and three-button navigation modes.
         webView.setOnApplyWindowInsetsListener((view, insets) -> {
-            int statusBarInset = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                    ? insets.getInsets(WindowInsets.Type.statusBars()).top
-                    : insets.getSystemWindowInsetTop();
-            view.setPadding(view.getPaddingLeft(), statusBarInset,
-                    view.getPaddingRight(), view.getPaddingBottom());
+            updateWebInsets(insets);
+            view.setPadding(0, 0, 0, 0);
             return insets;
         });
         webView.requestApplyInsets();
@@ -240,6 +255,8 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 if (DEBUG) Log.d(TAG, "Page loaded: " + url);
+                webPageLoaded = true;
+                applyWebInsetsToPage();
                 bridge.onPageFinished(url);
                 // Now that JS listeners are mounted, push a snapshot of the
                 // current battery / network / theme so the UI starts populated.
@@ -292,6 +309,54 @@ public class MainActivity extends AppCompatActivity {
 
         // Add JavaScript interface for Go communication
         webView.addJavascriptInterface(new WailsJSBridge(bridge, webView), "wails");
+    }
+
+    /**
+     * Convert native window insets to CSS pixels for the edge-to-edge web
+     * shell. System bars cover both status/navigation bars and display cutouts
+     * on modern Android; the legacy branch preserves support for API 23-29.
+     */
+    private void updateWebInsets(WindowInsets insets) {
+        int left;
+        int top;
+        int right;
+        int bottom;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Insets bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            left = bars.left;
+            top = bars.top;
+            right = bars.right;
+            bottom = bars.bottom;
+        } else {
+            left = insets.getSystemWindowInsetLeft();
+            top = insets.getSystemWindowInsetTop();
+            right = insets.getSystemWindowInsetRight();
+            bottom = insets.getSystemWindowInsetBottom();
+        }
+
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) density = 1f;
+        webInsetLeft = left / density;
+        webInsetTop = top / density;
+        webInsetRight = right / density;
+        webInsetBottom = bottom / density;
+        applyWebInsetsToPage();
+    }
+
+    private void applyWebInsetsToPage() {
+        if (webView == null || !webPageLoaded) return;
+        String js = "(function(){const r=document.documentElement;"
+                + "r.style.setProperty('--app-inset-native-left','" + cssPixels(webInsetLeft) + "');"
+                + "r.style.setProperty('--app-inset-native-top','" + cssPixels(webInsetTop) + "');"
+                + "r.style.setProperty('--app-inset-native-right','" + cssPixels(webInsetRight) + "');"
+                + "r.style.setProperty('--app-inset-native-bottom','" + cssPixels(webInsetBottom) + "');"
+                + "})();";
+        webView.evaluateJavascript(js, null);
+    }
+
+    private String cssPixels(float value) {
+        return String.format(Locale.US, "%.2fpx", value);
     }
 
     private void loadApplication() {
