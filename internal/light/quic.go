@@ -82,8 +82,9 @@ func newQUICClient() (*http.Client, func(), error) {
 }
 
 func (s *FileTransferService) clientForPeer(peerAddr string) (*http.Client, string, func(), error) {
+	tcpClient := s.sharedTCPClient()
 	if normalizeTransportMode(s.settings.GetSettings().TransportMode) != "quic" {
-		return http.DefaultClient, "http", func() {}, nil
+		return tcpClient, "http", func() {}, nil
 	}
 
 	client, err := s.sharedQUICClient()
@@ -107,7 +108,16 @@ func (s *FileTransferService) clientForPeer(peerAddr string) (*http.Client, stri
 	// A QUIC handshake failure is expected when the peer is on the stable TCP
 	// setting or the network blocks UDP. Fall back before /api/prepare and any
 	// file body are sent, so the transfer cannot be duplicated or half-retried.
-	return http.DefaultClient, "http", func() {}, nil
+	return tcpClient, "http", func() {}, nil
+}
+
+func (s *FileTransferService) sharedTCPClient() *http.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tcpClient == nil {
+		s.tcpClient = newTCPClient()
+	}
+	return s.tcpClient
 }
 
 func (s *FileTransferService) sharedQUICClient() (*http.Client, error) {

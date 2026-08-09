@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"net/http"
@@ -21,11 +22,13 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-const chunkSize = 1 << 20 // 1MB
-
-const partialFileMaxAge = 24 * time.Hour
-
-const maxParallelUploads = 4
+const (
+	chunkSize             = 1 << 20 // 1 MiB receiver copy buffer
+	partialFileMaxAge     = 24 * time.Hour
+	maxParallelUploads    = 4
+	mobileParallelUploads = 2
+	progressInterval      = 200 * time.Millisecond
+)
 
 type acceptState struct {
 	status     string // pending | accepted | rejected | cancelled
@@ -54,6 +57,7 @@ type FileTransferService struct {
 	server     *http.Server
 	ln         net.Listener
 	mux        *http.ServeMux
+	tcpClient  *http.Client
 	quic       quicHTTP3Server
 	quicConn   net.PacketConn
 	quicClient *http.Client
@@ -68,12 +72,28 @@ func NewFileTransferService(app *application.App, manager *TransferManager, sett
 		manager:   manager,
 		settings:  settings,
 		discovery: discovery,
+		tcpClient: newTCPClient(),
 		accepts:   make(map[string]*acceptState),
 		controls:  make(map[string]*sendControl),
 	}
 }
 
 func (s *FileTransferService) SetApp(app *application.App) { s.app = app }
+
+func newTCPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        16,
+			MaxIdleConnsPerHost: 8,
+			MaxConnsPerHost:     8,
+			IdleConnTimeout:     90 * time.Second,
+			WriteBufferSize:     64 << 10,
+			ReadBufferSize:      64 << 10,
+			DisableCompression:  true,
+		},
+		Timeout: 0,
+	}
+}
 
 // ---- HTTP server (receiver side) ----
 
@@ -305,49 +325,31 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	s.manager.RecordTransfer(&Transfer{ID: subID, Filename: fname, Size: size, Status: StatusActive})
 
 	h := sha256.New()
-	var written int64
-	start := time.Now()
-	lastEmit := start
-	buf := make([]byte, 32*1024)
-	for {
-		n, readErr := r.Body.Read(buf)
-		if n > 0 {
-			writtenBytes, writeErr := f.Write(buf[:n])
-			if writeErr != nil || writtenBytes != n {
-				errMsg := "incomplete write"
-				if writeErr != nil {
-					errMsg = writeErr.Error()
-				}
-				s.failTransfer(subID, fname, errMsg)
-				http.Error(w, "write error", 500)
-				return
-			}
-			h.Write(buf[:n])
-			written += int64(n)
-			offset += int64(n)
-			if time.Since(lastEmit) > 200*time.Millisecond {
-				elapsed := time.Since(start).Seconds()
-				speed := int64(0)
-				if elapsed > 0 {
-					speed = int64(float64(written) / elapsed)
-				}
-				s.manager.UpdateProgress(subID, offset, speed)
-				if s.app != nil {
-					s.app.Event.Emit("transfer-progress", map[string]any{
-						"id": subID, "filename": fname, "transferred": offset, "size": size, "speed": speed,
-					})
-				}
-				lastEmit = time.Now()
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			s.failTransfer(subID, fname, readErr.Error())
-			http.Error(w, "read error", 400)
-			return
-		}
+	receiver := &receivingWriter{
+		dst:          io.MultiWriter(f, h),
+		subID:        subID,
+		fname:        fname,
+		size:         size,
+		offset:       offset,
+		started:      time.Now(),
+		lastProgress: time.Now(),
+		lastEmit:     time.Now(),
+		app:          s.app,
+		manager:      s.manager,
+	}
+	written, err := io.CopyBuffer(receiver, r.Body, make([]byte, chunkSize))
+	receiver.reportProgress(true)
+	if err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		http.Error(w, "read/write error", 400)
+		return
+	}
+
+	if rawSize := strings.TrimSpace(r.Header.Get("X-File-Size")); rawSize != "" && written != size {
+		errMsg := fmt.Sprintf("size mismatch: received %d bytes, expected %d", written, size)
+		s.failTransfer(subID, fname, errMsg)
+		http.Error(w, errMsg, http.StatusBadRequest)
+		return
 	}
 
 	if err := f.Sync(); err != nil {
@@ -356,7 +358,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
-	if sum != checksum {
+	if checksum != "" && !strings.EqualFold(sum, checksum) {
 		s.failTransfer(subID, fname, "checksum mismatch")
 		http.Error(w, "checksum mismatch", 400)
 		return
@@ -381,7 +383,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		})
 	}
 	w.WriteHeader(200)
-	w.Write([]byte("ok"))
+	_, _ = fmt.Fprintf(w, "ok %s", sum)
 }
 
 // receiveDir returns the directory the receiver writes incoming files to. On
@@ -442,11 +444,7 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		if err != nil {
 			continue
 		}
-		sum, err := sha256File(p)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size(), Checksum: sum})
+		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size()})
 		paths = append(paths, p)
 	}
 	if len(entries) == 0 {
@@ -494,7 +492,7 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		}
 	}
 
-	semaphore := make(chan struct{}, maxParallelUploads)
+	semaphore := make(chan struct{}, s.parallelUploadLimit())
 	var wg sync.WaitGroup
 	var failuresMu sync.Mutex
 	var failures []string
@@ -519,6 +517,13 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		return fmt.Errorf("%d file(s) failed: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func (s *FileTransferService) parallelUploadLimit() int {
+	if PlatformDeviceType() == DeviceTypeMobile {
+		return mobileParallelUploads
+	}
+	return maxParallelUploads
 }
 
 func (s *FileTransferService) localEndpoint() string {
@@ -548,7 +553,7 @@ func (s *FileTransferService) waitAccept(peerAddr, tid string, client *http.Clie
 	return false
 }
 
-func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname string, size int64, sum string, client *http.Client, scheme string) error {
+func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname string, size int64, _ string, client *http.Client, scheme string) error {
 	subID := tid + ":" + fname
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := &sendControl{status: StatusActive, resumeCh: make(chan struct{})}
@@ -578,7 +583,8 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 
 	cr := &countingReader{
 		r: f, ctrl: ctrl, subID: subID, fname: fname, size: size,
-		started: time.Now(), lastEmit: time.Now(), app: s.app, manager: s.manager,
+		started: time.Now(), lastProgress: time.Now(), lastEmit: time.Now(),
+		app: s.app, manager: s.manager, hash: sha256.New(),
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, scheme+"://"+peerAddr+"/api/transfer", cr)
@@ -590,7 +596,6 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 	req.Header.Set("X-Filename", fname)
 	req.Header.Set("X-File-Size", strconv.FormatInt(size, 10))
 	req.Header.Set("X-Offset", "0")
-	req.Header.Set("X-Checksum-Sha256", sum)
 	req.ContentLength = size
 
 	resp, err := client.Do(req)
@@ -603,6 +608,7 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 		}
 		return err
 	}
+	cr.reportProgress(true)
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
@@ -610,11 +616,22 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 		s.failTransfer(subID, fname, errMsg)
 		return errors.New(errMsg)
 	}
+	receiverChecksum, err := parseTransferReceipt(strings.TrimSpace(string(respBody)))
+	if err != nil {
+		s.failTransfer(subID, fname, err.Error())
+		return err
+	}
+	senderChecksum := cr.checksum()
+	if !strings.EqualFold(receiverChecksum, senderChecksum) {
+		errMsg := fmt.Sprintf("checksum mismatch: sender %s, receiver %s", senderChecksum, receiverChecksum)
+		s.failTransfer(subID, fname, errMsg)
+		return errors.New(errMsg)
+	}
 
-	s.manager.Complete(subID, "", sum)
+	s.manager.Complete(subID, "", senderChecksum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
-			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": sum,
+			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": senderChecksum,
 		})
 	}
 	return nil
@@ -732,16 +749,18 @@ func (s *FileTransferService) failTransfer(subID, fname, msg string) {
 
 // countingReader reports upload progress and honours pause/cancel on the sender.
 type countingReader struct {
-	r        io.Reader
-	ctrl     *sendControl
-	subID    string
-	fname    string
-	size     int64
-	started  time.Time
-	lastEmit time.Time
-	sent     int64
-	app      *application.App
-	manager  *TransferManager
+	r            io.Reader
+	hash         hash.Hash
+	ctrl         *sendControl
+	subID        string
+	fname        string
+	size         int64
+	started      time.Time
+	lastProgress time.Time
+	lastEmit     time.Time
+	sent         int64
+	app          *application.App
+	manager      *TransferManager
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
@@ -761,36 +780,93 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	n, err := c.r.Read(p)
 	if n > 0 {
+		_, _ = c.hash.Write(p[:n])
 		c.sent += int64(n)
-		elapsed := time.Since(c.started).Seconds()
-		if elapsed > 0 {
-			speed := int64(float64(c.sent) / elapsed)
-			c.manager.UpdateProgress(c.subID, c.sent, speed)
-			now := time.Now()
-			if now.Sub(c.lastEmit) > 200*time.Millisecond {
-				c.lastEmit = now
-				if c.app != nil {
-					c.app.Event.Emit("transfer-progress", map[string]any{
-						"id": c.subID, "filename": c.fname, "transferred": c.sent, "size": c.size, "speed": speed,
-					})
-				}
-			}
-		}
+		c.reportProgress(false)
 	}
 	return n, err
 }
 
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
+func (c *countingReader) reportProgress(force bool) {
+	now := time.Now()
+	if !force && now.Sub(c.lastProgress) < progressInterval {
+		return
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	c.lastProgress = now
+	elapsed := now.Sub(c.started).Seconds()
+	speed := int64(0)
+	if elapsed > 0 {
+		speed = int64(float64(c.sent) / elapsed)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	c.manager.UpdateProgress(c.subID, c.sent, speed)
+	if c.app != nil && (force || now.Sub(c.lastEmit) >= progressInterval) {
+		c.lastEmit = now
+		c.app.Event.Emit("transfer-progress", map[string]any{
+			"id": c.subID, "filename": c.fname, "transferred": c.sent, "size": c.size, "speed": speed,
+		})
+	}
+}
+
+func (c *countingReader) checksum() string {
+	return hex.EncodeToString(c.hash.Sum(nil))
+}
+
+type receivingWriter struct {
+	dst          io.Writer
+	subID        string
+	fname        string
+	size         int64
+	offset       int64
+	written      int64
+	started      time.Time
+	lastProgress time.Time
+	lastEmit     time.Time
+	app          *application.App
+	manager      *TransferManager
+}
+
+func (w *receivingWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		w.written += int64(n)
+		w.reportProgress(false)
+	}
+	return n, err
+}
+
+func (w *receivingWriter) reportProgress(force bool) {
+	now := time.Now()
+	if !force && now.Sub(w.lastProgress) < progressInterval {
+		return
+	}
+	w.lastProgress = now
+	elapsed := now.Sub(w.started).Seconds()
+	speed := int64(0)
+	if elapsed > 0 {
+		speed = int64(float64(w.written) / elapsed)
+	}
+	transferred := w.offset + w.written
+	w.manager.UpdateProgress(w.subID, transferred, speed)
+	if w.app != nil && (force || now.Sub(w.lastEmit) >= progressInterval) {
+		w.lastEmit = now
+		w.app.Event.Emit("transfer-progress", map[string]any{
+			"id": w.subID, "filename": w.fname, "transferred": transferred, "size": w.size, "speed": speed,
+		})
+	}
+}
+
+func parseTransferReceipt(body string) (string, error) {
+	fields := strings.Fields(body)
+	if len(fields) != 2 || fields[0] != "ok" {
+		return "", fmt.Errorf("invalid receiver response: %q", body)
+	}
+	if len(fields[1]) != sha256.Size*2 {
+		return "", fmt.Errorf("invalid receiver checksum")
+	}
+	if _, err := hex.DecodeString(fields[1]); err != nil {
+		return "", fmt.Errorf("invalid receiver checksum: %w", err)
+	}
+	return strings.ToLower(fields[1]), nil
 }
 
 func atoi64(s string) int64 {
