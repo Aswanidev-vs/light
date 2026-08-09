@@ -203,6 +203,10 @@ func (s *FileTransferService) handlePrepare(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "missing transferId", 400)
 		return
 	}
+	// Use the address that actually reached this receiver for reverse sharing.
+	// The sender's first local interface can be an unreachable APIPA adapter,
+	// while the prepare request already proves which peer address is reachable.
+	p.SenderAddr = observedPeerAddress(r, p.SenderAddr, s.settings.GetSettings().Port)
 
 	s.mu.Lock()
 	st, ok := s.accepts[p.TransferID]
@@ -535,6 +539,24 @@ func (s *FileTransferService) localEndpoint() string {
 		return s.discovery.LocalEndpoint()
 	}
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(s.settings.GetSettings().Port))
+}
+
+func observedPeerAddress(r *http.Request, advertised string, fallbackPort int) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil || host == "" {
+		return advertised
+	}
+	if ip := net.ParseIP(host); ip == nil {
+		return advertised
+	} else if v4 := ip.To4(); v4 != nil {
+		host = v4.String()
+	}
+
+	port := strconv.Itoa(fallbackPort)
+	if _, advertisedPort, err := net.SplitHostPort(strings.TrimSpace(advertised)); err == nil && advertisedPort != "" {
+		port = advertisedPort
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func (s *FileTransferService) waitAccept(peerAddr, tid string, client *http.Client, scheme string) bool {
