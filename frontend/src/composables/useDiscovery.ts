@@ -6,6 +6,7 @@ import type { Device } from '../types'
 const devices = ref<Device[]>([])
 const selectedId = ref<string | null>(null)
 const remembered = ref<Record<string, Device>>({})
+const refreshing = ref(false)
 let inited = false
 
 const rememberedStorageKey = 'light:paired-devices'
@@ -73,6 +74,17 @@ export function useDiscovery() {
     listen('device-lost', (p: { id: string }) => remove(p.id))
   }
 
+  async function refresh() {
+    if (refreshing.value) return
+    refreshing.value = true
+    try {
+      devices.value = (await DiscoveryService.Refresh()) || []
+      for (const peer of Object.values(remembered.value)) upsert(peer)
+    } finally {
+      refreshing.value = false
+    }
+  }
+
   function select(id: string) {
     selectedId.value = selectedId.value === id ? null : id
   }
@@ -97,5 +109,5 @@ export function useDiscovery() {
     if (selectedId.value === id) selectedId.value = null
   }
 
-  return { devices, selectedId, selected, count, init, select, addPeer, rememberPeer, forgetPeer, upsert }
+  return { devices, selectedId, selected, count, refreshing, init, refresh, select, addPeer, rememberPeer, forgetPeer, upsert }
 }

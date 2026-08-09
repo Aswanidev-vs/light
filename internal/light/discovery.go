@@ -134,6 +134,11 @@ func (d *DiscoveryService) handleBeacon(b beacon, raddr *net.UDPAddr) {
 	if b.ID == "" {
 		return
 	}
+	// APIPA/link-local addresses usually belong to a disconnected or
+	// auto-configured adapter and are not valid LAN endpoints for transfers.
+	if raddr == nil || raddr.IP.IsLinkLocalUnicast() {
+		return
+	}
 	// Self-filter using the stable device ID (never a constant).
 	if b.ID == d.settings.DeviceID() {
 		return
@@ -275,7 +280,7 @@ func (d *DiscoveryService) ensureSenders() []*net.UDPConn {
 				if !ok {
 					continue
 				}
-				if ipnet.IP.To4() == nil {
+				if !isUsableLANIPv4(ipnet.IP) {
 					continue
 				}
 				if bcast := directedBroadcast(ipnet); bcast != nil {
@@ -328,6 +333,24 @@ func (d *DiscoveryService) GetDevices() []Device {
 		out = append(out, *dev)
 	}
 	return out
+}
+
+// Refresh reopens discovery senders so a changed Wi-Fi or Ethernet interface
+// is picked up immediately, then announces this device on the active LANs.
+func (d *DiscoveryService) Refresh() []Device {
+	d.mu.Lock()
+	if d.closed || d.conn == nil {
+		d.mu.Unlock()
+		return d.GetDevices()
+	}
+	for _, sender := range d.senders {
+		_ = sender.Close()
+	}
+	d.senders = nil
+	d.mu.Unlock()
+
+	d.announce()
+	return d.GetDevices()
 }
 
 func (d *DiscoveryService) PairByCode(code string) *Device {
@@ -390,11 +413,16 @@ func firstLANIPv4() (string, error) {
 		}
 		for _, a := range addrs {
 			if ipnet, ok := a.(*net.IPNet); ok {
-				if v4 := ipnet.IP.To4(); v4 != nil && !v4.IsLoopback() {
+				if v4 := ipnet.IP.To4(); isUsableLANIPv4(v4) {
 					return v4.String(), nil
 				}
 			}
 		}
 	}
 	return "127.0.0.1", fmt.Errorf("no LAN IPv4 address found")
+}
+
+func isUsableLANIPv4(ip net.IP) bool {
+	v4 := ip.To4()
+	return v4 != nil && !v4.IsLoopback() && !v4.IsLinkLocalUnicast() && !v4.IsUnspecified()
 }

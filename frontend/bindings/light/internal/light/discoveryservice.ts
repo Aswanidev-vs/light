@@ -57,6 +57,16 @@ export function PairByCode(code: string): $CancellablePromise<$models.Device | n
     });
 }
 
+/**
+ * Refresh reopens discovery senders so a changed Wi-Fi or Ethernet interface
+ * is picked up immediately, then announces this device on the active LANs.
+ */
+export function Refresh(): $CancellablePromise<$models.Device[]> {
+    return $Call.ByID(1505301652).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
 export function SetApp(app: application$0.App | null): $CancellablePromise<void> {
     return $Call.ByID(2953749430, app);
 }

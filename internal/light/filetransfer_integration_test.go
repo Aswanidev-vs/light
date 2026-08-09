@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -62,8 +63,8 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 		t.Fatalf("prepare status = %d, want %d", prepareResponse.StatusCode, http.StatusOK)
 	}
 	state := service.accepts[transferID]
-	if state == nil || state.senderID != "integration-sender-id" || state.senderAddr != "192.168.1.10:9120" || state.senderType != DeviceTypeDesktop {
-		t.Fatalf("sender metadata = %#v, want persisted sender identity", state)
+	if state == nil || state.senderID != "integration-sender-id" || state.senderAddr != "127.0.0.1:9120" || state.senderType != DeviceTypeDesktop {
+		t.Fatalf("sender metadata = %#v, want observed sender identity", state)
 	}
 
 	transferRequest, err := http.NewRequest(http.MethodPut, server.URL+"/api/transfer", bytes.NewReader(payload))
@@ -100,6 +101,42 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 	history := manager.GetHistory(1)
 	if len(history) != 1 || history[0].Status != StatusCompleted || history[0].Size != int64(len(payload)) || history[0].FilePath == "" {
 		t.Fatalf("history = %#v, want one completed transfer with a file path", history)
+	}
+}
+
+func TestPrepareUsesObservedPeerAddressForReverseSharing(t *testing.T) {
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{Port: 9120, AutoAccept: true}}
+	service := NewFileTransferService(nil, manager, settings, nil)
+
+	payload, err := json.Marshal(PreparePayload{
+		TransferID: "reverse-share",
+		SenderAddr: "169.254.195.132:9120",
+		Files:      []FileManifestEntry{{Name: "file.bin", Size: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/prepare", bytes.NewReader(payload))
+	request.RemoteAddr = "192.168.1.50:54321"
+	response := httptest.NewRecorder()
+
+	service.handlePrepare(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prepare status = %d, want %d", response.Code, http.StatusOK)
+	}
+	state := service.accepts["reverse-share"]
+	if state == nil || state.senderAddr != "192.168.1.50:9120" {
+		t.Fatalf("sender address = %#v, want observed LAN address", state)
+	}
+}
+
+func TestIsUsableLANIPv4RejectsLinkLocalAddresses(t *testing.T) {
+	if isUsableLANIPv4(net.ParseIP("169.254.195.132")) {
+		t.Fatal("link-local address was accepted as a LAN endpoint")
+	}
+	if !isUsableLANIPv4(net.ParseIP("192.168.1.50")) {
+		t.Fatal("private LAN address was rejected")
 	}
 }
 
@@ -162,6 +199,12 @@ func TestSendFilesUploadsInParallel(t *testing.T) {
 	}
 	if manifest.SenderID != "parallel-sender-id" || manifest.SenderAddr == "" || manifest.SenderType != DeviceTypeDesktop {
 		t.Fatalf("manifest sender metadata = %#v, want sender identity, address, and type", manifest)
+	}
+}
+
+func TestMobileParallelUploadLimit(t *testing.T) {
+	if mobileParallelUploads != 4 {
+		t.Fatalf("mobile parallel uploads = %d, want 4", mobileParallelUploads)
 	}
 }
 
