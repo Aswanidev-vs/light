@@ -57,18 +57,18 @@ type FileTransferService struct {
 	settings  *SettingsService
 	discovery *DiscoveryService
 
-	mu         sync.Mutex
-	server     *http.Server
-	ln         net.Listener
-	mux        *http.ServeMux
-	tcpClient  *http.Client
-	quic       quicHTTP3Server
-	quicConn   net.PacketConn
-	quicClient *http.Client
-	quicClose  func()
-	quicProbes map[string]quicProbeState
-	accepts    map[string]*acceptState
-	controls   map[string]*sendControl
+	mu          sync.Mutex
+	server      *http.Server
+	ln          net.Listener
+	mux         *http.ServeMux
+	tcpClient   *http.Client
+	quic        quicHTTP3Server
+	quicConn    net.PacketConn
+	quicClient  *http.Client
+	quicClose   func()
+	quicProbes  map[string]quicProbeState
+	accepts     map[string]*acceptState
+	controls    map[string]*sendControl
 	cleanedDirs sync.Map
 }
 
@@ -90,6 +90,11 @@ func (s *FileTransferService) SetApp(app *application.App) { s.app = app }
 func newTCPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				Control:   transferSocketControl,
+			}).DialContext,
 			MaxIdleConns:        16,
 			MaxIdleConnsPerHost: 8,
 			MaxConnsPerHost:     8,
@@ -412,8 +417,8 @@ func (s *FileTransferService) receiveDir() (string, error) {
 			filepath.Join(os.TempDir(), "light-downloads"),
 		} {
 			if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
-			s.cleanupPartialFilesOnce(dir)
-			return dir, nil
+				s.cleanupPartialFilesOnce(dir)
+				return dir, nil
 			} else {
 				lastErr = mkErr
 			}
