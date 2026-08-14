@@ -56,11 +56,6 @@ HTTP/3. It uses an ephemeral self-signed certificate: traffic is encrypted,
 but peer identity is not authenticated yet. TCP remains the recommended
 default.
 
-Direct Wi-Fi/Android Wi-Fi Direct and Windows Wi-Fi Direct adapters are not
-part of the current transport mode. The app can still use a manually created
-hotspot or Wi-Fi Direct network when the devices receive reachable LAN
-addresses; native connection management is a separate platform integration.
-
 To compare the local transport paths:
 
 ```bash
@@ -139,6 +134,8 @@ build/                       Wails platform/build configuration
 - [Go 1.25+](https://go.dev/dl/)
 - [Node.js 22+](https://nodejs.org/)
 - [Wails3 CLI](https://v3.wails.io/) (`go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.2`)
+- Android builds additionally require JDK 17+, Android SDK Platform 35, and
+  Android NDK `26.3.11579264`.
 
 ### Development
 
@@ -163,9 +160,16 @@ wails3 build
 # Build Windows
 GOOS=windows wails3 build
 
-# Build Android APK
+# Build an Android APK (requires the Android SDK and NDK)
 wails3 task android:package
+
+# Build an APK containing arm64-v8a and x86_64 binaries
+wails3 task android:package:fat
 ```
+
+The Android build uses `minSdk 23`, `targetSdk 35`, and the NDK version shown
+above. Set `ANDROID_HOME` or `ANDROID_SDK_ROOT` when the SDK is not installed
+in the default location; set `ANDROID_NDK_HOME` to select a specific NDK.
 
 ## Configuration
 
