@@ -113,6 +113,10 @@ export class Settings {
     "deviceName": string;
     "port": number;
     "downloadDir": string;
+
+    /**
+     * Android SAF tree URI for the chosen folder
+     */
     "downloadDirUri": string;
     "autoAccept": boolean;
     "theme": string;
@@ -123,6 +127,15 @@ export class Settings {
      * default; QUIC probes HTTP/3 first and falls back to TCP before uploading.
      */
     "transportMode": string;
+
+    /**
+     * WifiDirect, when enabled, attempts to form a Wi-Fi Direct (P2P) group with
+     * a peer so transfers run over a private link instead of the shared LAN. It is
+     * opt-in and orthogonal to TransportMode; if group formation fails the app
+     * falls back to normal LAN discovery. Unsupported on macOS, where the toggle
+     * is hidden.
+     */
+    "wifiDirect": boolean;
 
     /** Creates a new Settings instance. */
     constructor($$source: Partial<Settings> = {}) {
@@ -148,7 +161,10 @@ export class Settings {
             this["enableEncryption"] = false;
         }
         if (!("transportMode" in $$source)) {
-            this["transportMode"] = "tcp";
+            this["transportMode"] = "";
+        }
+        if (!("wifiDirect" in $$source)) {
+            this["wifiDirect"] = false;
         }
 
         Object.assign(this, $$source);
@@ -274,6 +290,46 @@ export enum TransferStatus {
     StatusFailed = "failed",
     StatusCancelled = "cancelled",
 };
+
+/**
+ * WifiDirectManager establishes a Wi-Fi Direct (P2P) link to a peer and reports
+ * the peer's transfer address. The existing HTTP/TCP (and optional QUIC) transfer
+ * stack rides on top of the link unchanged — this manager only changes how peers
+ * become reachable, not the transport protocol.
+ * 
+ * Implementations are platform-specific and selected at runtime by
+ * NewWifiDirectManager. On unsupported platforms (e.g. macOS) Connect/Discover
+ * return ErrWifiDirectUnsupported so callers fall back to LAN discovery.
+ */
+export type WifiDirectManager = any;
+
+/**
+ * WifiDirectPeer is a nearby device found via Wi-Fi Direct discovery.
+ */
+export class WifiDirectPeer {
+    "id": string;
+    "name": string;
+
+    /** Creates a new WifiDirectPeer instance. */
+    constructor($$source: Partial<WifiDirectPeer> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new WifiDirectPeer instance from a string or object.
+     */
+    static createFrom($$source: any = {}): WifiDirectPeer {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new WifiDirectPeer($$parsedSource as Partial<WifiDirectPeer>);
+    }
+}
 
 // Private type creation functions
 const $$createType0 = $Create.Nullable($Create.DateFromTime);

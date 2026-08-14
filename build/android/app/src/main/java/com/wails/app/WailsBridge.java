@@ -28,6 +28,12 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.net.wifi.WpsInfo;
+import android.net.wifi.p2p.WifiP2pConfig;
+import android.net.wifi.p2p.WifiP2pDevice;
+import android.net.wifi.p2p.WifiP2pDeviceList;
+import android.net.wifi.p2p.WifiP2pInfo;
+import android.net.wifi.p2p.WifiP2pManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
@@ -120,6 +126,15 @@ public class WailsBridge {
     private static native void nativeEmitSystemEvent(String name, String json);
     private static native void nativeEmitEvent(String name, String json);
 
+    // Wi-Fi Direct bridge (see wifidirect_android.go / wifidirect_android_bridge.go
+    // in the Go source). nativeWifiDirectInit stores the bridge reference in Go so
+    // the Go side can call back into Java; the report/connected/error methods push
+    // host-side WifiP2pManager state up to the Go manager.
+    private native void nativeWifiDirectInit();
+    private native void nativeWifiDirectReportPeers(String json);
+    private native void nativeWifiDirectConnected(String ip);
+    private native void nativeWifiDirectError(String msg);
+
     public WailsBridge(Activity activity) {
         this.activity = activity;
     }
@@ -137,6 +152,14 @@ public class WailsBridge {
             Log.i(TAG, "Wails bridge initialized");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize Wails bridge", e);
+        }
+        // Wire up the Wi-Fi Direct bridge. Wrapped so a missing native symbol (e.g.
+        // a build without the wifidirect backend) never blocks app startup.
+        try {
+            nativeWifiDirectInit();
+            initWifiDirect();
+        } catch (Throwable t) {
+            Log.w(TAG, "Wi-Fi Direct bridge init skipped", t);
         }
     }
 
@@ -786,6 +809,168 @@ public class WailsBridge {
         } catch (Exception e) {
             Log.e(TAG, "secureDelete failed", e);
         }
+    }
+
+    // MARK: - Wi-Fi Direct (P2P)
+
+    // Android's Wi-Fi Direct stack is Java-only (WifiP2pManager), so the Go side
+    // cannot drive it directly. The Go manager owns the state machine and calls
+    // these public methods; the host reports discovered peers and the negotiated
+    // group owner IP back to Go via the nativeWifiDirect* methods.
+    private WifiP2pManager wifiP2pManager;
+    private WifiP2pManager.Channel wifiP2pChannel;
+    private boolean wifiDirectReady = false;
+
+    private static final int WIFI_DIRECT_PERMISSION_REQUEST = 1004;
+
+    /**
+     * Set up the WifiP2pManager + channel and register the broadcast receiver that
+     * forwards peer-list and connection-info changes to Go. Called once from
+     * initialize() after the bridge reference has been shared with Go.
+     */
+    private void initWifiDirect() {
+        try {
+            Object svc = activity.getSystemService(Context.WIFI_P2P_SERVICE);
+            if (!(svc instanceof WifiP2pManager)) {
+                Log.w(TAG, "Wi-Fi Direct not available on this device");
+                return;
+            }
+            wifiP2pManager = (WifiP2pManager) svc;
+            wifiP2pChannel = wifiP2pManager.initialize(activity, Looper.getMainLooper(), null);
+            if (wifiP2pChannel == null) {
+                Log.w(TAG, "Wi-Fi Direct channel init failed");
+                return;
+            }
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION);
+            filter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION);
+            activity.registerReceiver(wifiP2pReceiver, filter);
+            wifiDirectReady = true;
+            // Prime an initial peer query so a fresh Discover() returns quickly.
+            wifiP2pManager.requestPeers(wifiP2pChannel, peerListListener);
+        } catch (Exception e) {
+            Log.e(TAG, "initWifiDirect failed", e);
+        }
+    }
+
+    /** Forward Wi-Fi Direct system broadcasts to the relevant listeners. */
+    private final BroadcastReceiver wifiP2pReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (wifiP2pManager == null || wifiP2pChannel == null) return;
+            String action = intent.getAction();
+            if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) {
+                wifiP2pManager.requestPeers(wifiP2pChannel, peerListListener);
+            } else if (WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION.equals(action)) {
+                wifiP2pManager.requestConnectionInfo(wifiP2pChannel, connectionInfoListener);
+            }
+        }
+    };
+
+    /** Serialise the discovered devices and push them up to Go. */
+    private final WifiP2pManager.PeerListListener peerListListener =
+            new WifiP2pManager.PeerListListener() {
+                @Override
+                public void onPeersAvailable(WifiP2pDeviceList peers) {
+                    try {
+                        JSONArray arr = new JSONArray();
+                        for (WifiP2pDevice d : peers.getDeviceList()) {
+                            JSONObject o = new JSONObject();
+                            // The device address (MAC) is what Go passes back to
+                            // wifiDirectConnect, so it must be the stable peer id.
+                            o.put("id", d.deviceAddress);
+                            o.put("name", d.deviceName != null && !d.deviceName.isEmpty()
+                                    ? d.deviceName : d.deviceAddress);
+                            arr.put(o);
+                        }
+                        nativeWifiDirectReportPeers(arr.toString());
+                    } catch (Exception e) {
+                        Log.e(TAG, "peerListListener failed", e);
+                    }
+                }
+            };
+
+    /** Report the negotiated group owner address (the peer's transfer endpoint). */
+    private final WifiP2pManager.ConnectionInfoListener connectionInfoListener =
+            new WifiP2pManager.ConnectionInfoListener() {
+                @Override
+                public void onConnectionInfoAvailable(WifiP2pInfo info) {
+                    if (info != null && info.groupFormed && info.groupOwnerAddress != null) {
+                        nativeWifiDirectConnected(info.groupOwnerAddress.getHostAddress());
+                    }
+                }
+            };
+
+    /**
+     * Ensure the caller holds the permissions Wi-Fi Direct needs. On API 33+ that
+     * is NEARBY_WIFI_DEVICES; below 33 it is ACCESS_FINE_LOCATION (already in the
+     * manifest). Requests the missing permission if absent and proceeds — discovery
+     * will report an error via nativeWifiDirectError if still ungranted.
+     */
+    private void ensureWifiDirectPermission() {
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (activity.checkSelfPermission(
+                        "android.permission.NEARBY_WIFI_DEVICES") != PackageManager.PERMISSION_GRANTED) {
+                    activity.requestPermissions(
+                            new String[]{"android.permission.NEARBY_WIFI_DEVICES"},
+                            WIFI_DIRECT_PERMISSION_REQUEST);
+                }
+            } else if (activity.checkSelfPermission(
+                    "android.permission.ACCESS_FINE_LOCATION") != PackageManager.PERMISSION_GRANTED) {
+                activity.requestPermissions(
+                        new String[]{"android.permission.ACCESS_FINE_LOCATION"},
+                        WIFI_DIRECT_PERMISSION_REQUEST);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "ensureWifiDirectPermission failed", e);
+        }
+    }
+
+    /** Go -> Java: begin peer discovery (WifiP2pManager.discoverPeers). */
+    public void wifiDirectStartDiscovery() {
+        ensureWifiDirectPermission();
+        if (!wifiDirectReady || wifiP2pManager == null || wifiP2pChannel == null) {
+            nativeWifiDirectError("wifi-direct: manager unavailable");
+            return;
+        }
+        wifiP2pManager.discoverPeers(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+            @Override public void onSuccess() { }
+            @Override public void onFailure(int reason) {
+                nativeWifiDirectError("wifi-direct: discover failed (reason " + reason + ")");
+            }
+        });
+    }
+
+    /** Go -> Java: connect to a peer by its device address. */
+    public void wifiDirectConnect(final String deviceAddress) {
+        ensureWifiDirectPermission();
+        if (!wifiDirectReady || wifiP2pManager == null || wifiP2pChannel == null) {
+            nativeWifiDirectError("wifi-direct: manager unavailable");
+            return;
+        }
+        final WifiP2pConfig config = new WifiP2pConfig();
+        config.deviceAddress = deviceAddress;
+        config.wps.setup = WpsInfo.PBC;
+        wifiP2pManager.connect(wifiP2pChannel, config, new WifiP2pManager.ActionListener() {
+            @Override public void onSuccess() {
+                // The IP arrives asynchronously via the connection-info listener.
+            }
+            @Override public void onFailure(int reason) {
+                nativeWifiDirectError("wifi-direct: connect failed (reason " + reason + ")");
+            }
+        });
+    }
+
+    /** Go -> Java: tear down the P2P group (removeGroup). */
+    public void wifiDirectCloseGroup() {
+        if (wifiP2pManager == null || wifiP2pChannel == null) return;
+        wifiP2pManager.removeGroup(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+            @Override public void onSuccess() { }
+            @Override public void onFailure(int reason) {
+                Log.w(TAG, "removeGroup failed (reason " + reason + ")");
+            }
+        });
     }
 
     // MARK: - Mobile features (Phase D: sensors & hardware)

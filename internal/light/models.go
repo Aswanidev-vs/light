@@ -90,4 +90,10 @@ type Settings struct {
 	// TransportMode controls outgoing transport selection. TCP is the stable
 	// default; QUIC probes HTTP/3 first and falls back to TCP before uploading.
 	TransportMode string `json:"transportMode"`
+	// WifiDirect, when enabled, attempts to form a Wi-Fi Direct (P2P) group with
+	// a peer so transfers run over a private link instead of the shared LAN. It is
+	// opt-in and orthogonal to TransportMode; if group formation fails the app
+	// falls back to normal LAN discovery. Unsupported on macOS, where the toggle
+	// is hidden.
+	WifiDirect bool `json:"wifiDirect"`
 }

@@ -12,6 +12,7 @@ const settings = ref<Settings>({
   theme: 'dark',
   enableEncryption: false,
   transportMode: 'tcp',
+  wifiDirect: false,
 })
 
 let inited = false

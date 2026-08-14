@@ -67,6 +67,28 @@ To compare the local transport paths:
 go test ./internal/light -run '^$' -bench '^BenchmarkTransferTransport$' -benchtime=1s
 ```
 
+## Experimental Wi-Fi Direct
+
+TCP/QUIC remains the stable default transport. The `wifiDirect` setting is an
+opt-in toggle in Settings (default off). When enabled for a peer, Light forms a
+private Wi-Fi Direct (P2P) group with that peer so transfers run over the
+direct link instead of the shared LAN.
+
+Wi-Fi Direct is orthogonal to the QUIC/TCP transport choice: it decides *which
+network* the transfer uses, while `transportMode` decides *which protocol* runs
+over it. If group formation fails, Light silently falls back to normal LAN
+discovery and transfer; peers found via Wi-Fi Direct then appear in the device
+list exactly like LAN peers.
+
+Supported platforms (experimental):
+
+- **Android** and **Windows** are supported experimentally. Android uses
+  `WifiP2pManager`; Windows uses the WinRT `WiFiDirectDevice` API, which
+  requires the app's `Proximity` capability.
+- **Linux** uses `wpa_supplicant` P2P when available.
+- **macOS is NOT supported** — Apple only exposes MultipeerConnectivity, which
+  cannot host the app's HTTP transfer server — so the toggle is hidden there.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -168,6 +190,7 @@ Settings are stored in `~/.light/settings.json`:
 | `autoAccept` | false | Accept incoming files without prompting |
 | `theme` | dark | UI theme (dark only for now) |
 | `transportMode` | tcp | `tcp` for the stable path, or `quic` to try HTTP/3 first and fall back to TCP |
+| `wifiDirect` | false | `false` for the stable path, or `true` to try forming a Wi-Fi Direct group with peers (experimental; falls back to LAN) |
 
 ## Architecture
 

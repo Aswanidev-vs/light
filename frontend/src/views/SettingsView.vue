@@ -10,6 +10,11 @@ import Icon from '../components/common/Icon.vue'
 const { settings } = useSettings()
 const { toast } = useUI()
 
+const wifiDirectSupported = ref(true)
+SettingsService.WifiDirectSupported().then((v) => {
+  wifiDirectSupported.value = v
+})
+
 const local = ref({ ...settings.value })
 watch(settings, () => {
   local.value = { ...settings.value }
@@ -178,6 +183,36 @@ onUnmounted(() => {
             :class="local.autoAccept ? 'toggle-thumb--on' : ''"
           />
         </button>
+      </div>
+
+      <!-- Wi-Fi Direct (experimental) -->
+      <div
+        v-if="wifiDirectSupported"
+        class="rounded-lg border border-accent/20 bg-accent/5 p-4"
+      >
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div class="mb-1 flex items-center gap-2">
+              <span class="text-sm font-medium">Wi-Fi Direct</span>
+              <span class="rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent">Experimental</span>
+            </div>
+            <div class="text-xs leading-relaxed text-content-faint">
+              Form a private P2P link with a peer for transfers. Experimental — reuses the existing HTTP/TCP(+QUIC) stack and falls back to normal LAN discovery if unavailable.
+            </div>
+          </div>
+          <button
+            class="toggle shrink-0"
+            :class="local.wifiDirect ? 'toggle--on' : ''"
+            :aria-pressed="local.wifiDirect"
+            aria-label="Toggle experimental Wi-Fi Direct"
+            @click="local.wifiDirect = !local.wifiDirect"
+          >
+            <span
+              class="toggle-thumb"
+              :class="local.wifiDirect ? 'toggle-thumb--on' : ''"
+            />
+          </button>
+        </div>
       </div>
 
       <!-- Save -->

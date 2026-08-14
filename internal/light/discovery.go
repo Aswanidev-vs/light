@@ -1,6 +1,7 @@
 package light
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -19,12 +20,12 @@ const (
 
 // beacon is the UDP presence advertisement sent on the LAN.
 type beacon struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Port       int    `json:"port"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Port        int    `json:"port"`
 	PairingCode string `json:"pairingCode"`
-	TS         int64  `json:"ts"`
+	TS          int64  `json:"ts"`
 }
 
 // DiscoveryService finds peer Light devices on the local network via UDP beacons.
@@ -41,6 +42,7 @@ type beacon struct {
 type DiscoveryService struct {
 	app      *application.App
 	settings *SettingsService
+	wfd      WifiDirectManager // optional Wi-Fi Direct backend; nil when disabled/unsupported
 
 	mu       sync.RWMutex
 	devices  map[string]*Device
@@ -48,10 +50,10 @@ type DiscoveryService struct {
 	codeExp  time.Time
 	selfType DeviceType
 
-	conn     *net.UDPConn
-	senders  []*net.UDPConn
-	closed   bool
-	lastErr  string
+	conn    *net.UDPConn
+	senders []*net.UDPConn
+	closed  bool
+	lastErr string
 
 	stopOnce sync.Once
 	stopChan chan struct{}
@@ -68,6 +70,75 @@ func NewDiscoveryService(app *application.App, settings *SettingsService) *Disco
 }
 
 func (d *DiscoveryService) SetApp(app *application.App) { d.app = app }
+
+// SetWifiDirectManager injects the platform Wi-Fi Direct backend. It is created
+// lazily by WifiDirectPeers/ConnectWifiDirect when the setting is enabled, but
+// can also be wired explicitly at startup.
+func (d *DiscoveryService) SetWifiDirectManager(m WifiDirectManager) {
+	d.mu.Lock()
+	d.wfd = m
+	d.mu.Unlock()
+}
+
+// WifiDirectPeers returns nearby devices discovered via Wi-Fi Direct, or nil when
+// the feature is disabled or unsupported. The transfer stack reuses the existing
+// device table, so no transport changes are needed.
+func (d *DiscoveryService) WifiDirectPeers(ctx context.Context) ([]WifiDirectPeer, error) {
+	d.mu.RLock()
+	m := d.wfd
+	d.mu.RUnlock()
+	if m == nil {
+		if !d.settings.GetSettings().WifiDirect {
+			return nil, nil
+		}
+		var err error
+		m, err = NewWifiDirectManager(true)
+		if err != nil || m == nil {
+			return nil, err
+		}
+		d.mu.Lock()
+		d.wfd = m
+		d.mu.Unlock()
+	}
+	return m.Discover(ctx)
+}
+
+// ConnectWifiDirect forms a P2P group with the peer and records its transfer
+// address in the device table so the existing HTTP/QUIC path can use it. It
+// falls back to returning ErrWifiDirectUnsupported when the platform cannot host
+// a link, leaving normal LAN discovery untouched.
+func (d *DiscoveryService) ConnectWifiDirect(ctx context.Context, peerID string) (string, error) {
+	d.mu.RLock()
+	m := d.wfd
+	d.mu.RUnlock()
+	if m == nil {
+		var err error
+		m, err = NewWifiDirectManager(d.settings.GetSettings().WifiDirect)
+		if err != nil || m == nil {
+			return "", ErrWifiDirectUnsupported
+		}
+		d.mu.Lock()
+		d.wfd = m
+		d.mu.Unlock()
+	}
+	addr, err := m.Connect(ctx, peerID)
+	if err != nil {
+		return "", err
+	}
+	d.mu.Lock()
+	existing, ok := d.devices[peerID]
+	if !ok {
+		existing = &Device{ID: peerID}
+		d.devices[peerID] = existing
+	}
+	existing.Address = addr
+	existing.LastSeen = time.Now()
+	d.mu.Unlock()
+	if d.app != nil {
+		d.app.Event.Emit("device-found", *existing)
+	}
+	return addr, nil
+}
 
 func (d *DiscoveryService) Start() error {
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: discoveryPort}
@@ -101,6 +172,10 @@ func (d *DiscoveryService) Stop() {
 			s.Close()
 		}
 		d.senders = nil
+		if d.wfd != nil {
+			_ = d.wfd.Close()
+			d.wfd = nil
+		}
 		d.mu.Unlock()
 	})
 }
@@ -221,12 +296,12 @@ func (d *DiscoveryService) announce() {
 	code := d.currentPairingCode()
 	cfg := d.settings.GetSettings()
 	b := beacon{
-		ID:         d.settings.DeviceID(),
-		Name:       cfg.DeviceName,
-		Type:       string(d.selfType),
-		Port:       cfg.Port,
+		ID:          d.settings.DeviceID(),
+		Name:        cfg.DeviceName,
+		Type:        string(d.selfType),
+		Port:        cfg.Port,
 		PairingCode: code,
-		TS:         time.Now().Unix(),
+		TS:          time.Now().Unix(),
 	}
 	data, err := json.Marshal(b)
 	if err != nil {
@@ -374,12 +449,12 @@ func (d *DiscoveryService) LocalEndpoint() string {
 }
 
 type Diagnostics struct {
-	MyID      string `json:"myId"`
-	Listening bool   `json:"listening"`
-	Devices   int    `json:"devices"`
-	Interfaces int   `json:"interfaces"`
-	Senders   int    `json:"senders"`
-	LastError string `json:"lastError"`
+	MyID       string `json:"myId"`
+	Listening  bool   `json:"listening"`
+	Devices    int    `json:"devices"`
+	Interfaces int    `json:"interfaces"`
+	Senders    int    `json:"senders"`
+	LastError  string `json:"lastError"`
 }
 
 func (d *DiscoveryService) Diagnostics() Diagnostics {

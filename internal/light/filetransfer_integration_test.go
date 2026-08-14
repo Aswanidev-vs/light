@@ -203,8 +203,80 @@ func TestSendFilesUploadsInParallel(t *testing.T) {
 }
 
 func TestMobileParallelUploadLimit(t *testing.T) {
-	if mobileParallelUploads != 4 {
-		t.Fatalf("mobile parallel uploads = %d, want 4", mobileParallelUploads)
+	if mobileParallelUploads >= maxParallelUploads {
+		t.Fatalf("mobile parallel uploads = %d, want strictly less than desktop limit %d", mobileParallelUploads, maxParallelUploads)
+	}
+
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{Port: 9120, AutoAccept: true}}
+	service := NewFileTransferService(nil, manager, settings, nil)
+
+	service.deviceType = DeviceTypeDesktop
+	if got := service.parallelUploadLimit(); got != maxParallelUploads {
+		t.Fatalf("desktop limit = %d, want %d", got, maxParallelUploads)
+	}
+	service.deviceType = DeviceTypeMobile
+	if got := service.parallelUploadLimit(); got != mobileParallelUploads {
+		t.Fatalf("mobile limit = %d, want %d", got, mobileParallelUploads)
+	}
+}
+
+func TestSendFilesRespectsMobileParallelLimit(t *testing.T) {
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DeviceName: "mobile sender", Port: 9121}, id: "mobile-sender-id"}
+	service := NewFileTransferService(nil, manager, settings, nil)
+	service.deviceType = DeviceTypeMobile
+
+	var active int32
+	var peak int32
+	updatePeak := func(value int32) {
+		for {
+			old := atomic.LoadInt32(&peak)
+			if value <= old || atomic.CompareAndSwapInt32(&peak, old, value) {
+				return
+			}
+		}
+	}
+
+	var received int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("accepted"))
+	})
+	mux.HandleFunc("/api/transfer", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&received, 1)
+		current := atomic.AddInt32(&active, 1)
+		updatePeak(current)
+		defer atomic.AddInt32(&active, -1)
+
+		time.Sleep(50 * time.Millisecond)
+		if err := writeTransferReceipt(w, r); err != nil {
+			t.Error(err)
+		}
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	paths := make([]string, 8)
+	for i := range paths {
+		paths[i] = filepath.Join(t.TempDir(), "mfile-"+strconv.Itoa(i)+".bin")
+		if err := os.WriteFile(paths[i], []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := service.SendFiles(TransferRequest{DeviceAddr: server.Listener.Addr().String(), FilePaths: paths}); err != nil {
+		t.Fatalf("SendFiles() error = %v", err)
+	}
+	if int(peak) > mobileParallelUploads {
+		t.Fatalf("mobile peak parallel uploads = %d, want at most %d", peak, mobileParallelUploads)
+	}
+	if peak < 1 {
+		t.Fatalf("mobile peak parallel uploads = %d, want at least one", peak)
+	}
+	if int(received) != len(paths) {
+		t.Fatalf("received %d files, want %d", received, len(paths))
 	}
 }
 

@@ -161,6 +161,7 @@ func (s *SettingsService) UpdateSettings(s2 Settings) {
 	s.cfg.AutoAccept = s2.AutoAccept
 	s.cfg.Theme = s2.Theme
 	s.cfg.EnableEncryption = s2.EnableEncryption
+	s.cfg.WifiDirect = s2.WifiDirect
 	if s2.TransportMode != "" {
 		s.cfg.TransportMode = normalizeTransportMode(s2.TransportMode)
 	}
@@ -177,6 +178,10 @@ func (s *SettingsService) SetDownloadDirUri(u string) {
 }
 func (s *SettingsService) SetAutoAccept(b bool) { s.set(func(c *Settings) { c.AutoAccept = b }) }
 func (s *SettingsService) SetTheme(t string)    { s.set(func(c *Settings) { c.Theme = t }) }
+
+// WifiDirectSupported reports whether the current platform can host a Wi-Fi
+// Direct link. macOS cannot, so the UI hides the toggle there.
+func (s *SettingsService) WifiDirectSupported() bool { return runtime.GOOS != "darwin" }
 
 func (s *SettingsService) set(mut func(*Settings)) {
 	s.mu.Lock()

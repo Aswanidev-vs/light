@@ -26,7 +26,10 @@ const (
 	chunkSize             = 1 << 20 // 1 MiB receiver copy buffer
 	partialFileMaxAge     = 24 * time.Hour
 	maxParallelUploads    = 4
-	mobileParallelUploads = 4
+	// mobileParallelUploads is deliberately lower than maxParallelUploads to cut
+	// CPU, memory, and battery pressure on phones, which also pay a
+	// scoped-storage (SAF) staging cost on the receive side.
+	mobileParallelUploads = 2
 	progressInterval      = 200 * time.Millisecond
 )
 
@@ -57,6 +60,9 @@ type FileTransferService struct {
 	settings  *SettingsService
 	discovery *DiscoveryService
 
+	// deviceType overrides PlatformDeviceType() for tests; empty uses the
+	// real platform type.
+	deviceType  DeviceType
 	mu          sync.Mutex
 	server      *http.Server
 	ln          net.Listener
@@ -546,11 +552,24 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 	return nil
 }
 
+// parallelUploadLimit returns the maximum number of files uploaded concurrently.
+// Mobile devices use a lower limit than desktop to cut CPU, memory, and battery
+// pressure; they also pay a scoped-storage (SAF) staging cost on the receive
+// side. The result is clamped to at least one so a misconfigured limit can
+// never deadlock the semaphore-based upload loop.
 func (s *FileTransferService) parallelUploadLimit() int {
-	if PlatformDeviceType() == DeviceTypeMobile {
-		return mobileParallelUploads
+	dev := s.deviceType
+	if dev == "" {
+		dev = PlatformDeviceType()
 	}
-	return maxParallelUploads
+	limit := maxParallelUploads
+	if dev == DeviceTypeMobile {
+		limit = mobileParallelUploads
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
 }
 
 func (s *FileTransferService) localEndpoint() string {

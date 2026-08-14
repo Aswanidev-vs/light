@@ -48,6 +48,10 @@ export function SetDownloadDir(d: string): $CancellablePromise<void> {
     return $Call.ByID(683392989, d);
 }
 
+export function SetDownloadDirUri(u: string): $CancellablePromise<void> {
+    return $Call.ByID(1072180501, u);
+}
+
 export function SetPort(p: number): $CancellablePromise<void> {
     return $Call.ByID(3728637401, p);
 }
@@ -58,6 +62,14 @@ export function SetTheme(t: string): $CancellablePromise<void> {
 
 export function UpdateSettings(s2: $models.Settings): $CancellablePromise<void> {
     return $Call.ByID(1137475426, s2);
+}
+
+/**
+ * WifiDirectSupported reports whether the current platform can host a Wi-Fi
+ * Direct link. macOS cannot, so the UI hides the toggle there.
+ */
+export function WifiDirectSupported(): $CancellablePromise<boolean> {
+    return $Call.ByID(1948522520);
 }
 
 // Private type creation functions
