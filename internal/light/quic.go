@@ -35,6 +35,8 @@ func lightQUICConfig() *quic.Config {
 		InitialConnectionReceiveWindow: 8 << 20,  // 8 MiB
 		MaxConnectionReceiveWindow:     64 << 20, // 64 MiB
 		MaxIdleTimeout:                 15 * time.Minute,
+		MaxIncomingStreams:             1000, // admit many parallel upload streams
+		Allow0RTT:                      true, // reuse sessions to known peers, skip handshake
 	}
 }
 
@@ -92,15 +94,38 @@ func newQUICCertificate() (tls.Certificate, error) {
 }
 
 func newQUICClient() (*http.Client, func(), error) {
+	// Bind the HTTP/3 client to a single UDP socket with an enlarged kernel
+	// buffer. The default UDP receive buffer (~212 KiB on Linux/Android) drops
+	// bursts and throttles QUIC at Wi-Fi speed; transferSocketControl raises it.
+	udpConn, err := (&net.ListenConfig{Control: transferSocketControl}).ListenPacket(context.Background(), "udp", "0.0.0.0:0")
+	if err != nil {
+		return nil, nil, err
+	}
+	qt := &quic.Transport{Conn: udpConn}
 	transport := &http3.Transport{
 		// Light currently has no certificate exchange/identity trust store. The
 		// QUIC path is opt-in and retains the app's existing LAN trust model.
 		// Traffic is encrypted, but peer authentication is not provided yet.
-		TLSClientConfig:    &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // experimental LAN transport
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // experimental LAN transport
+			ClientSessionCache: tls.NewLRUClientSessionCache(32),
+		},
 		DisableCompression: true,
 		QUICConfig:         lightQUICConfig(),
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			udpAddr, err := net.ResolveUDPAddr("udp", addr)
+			if err != nil {
+				return nil, err
+			}
+			return qt.DialEarly(ctx, udpAddr, tlsCfg, cfg)
+		},
 	}
-	return &http.Client{Transport: transport}, func() { _ = transport.Close() }, nil
+	closeClient := func() {
+		_ = transport.Close()
+		_ = qt.Close()
+		_ = udpConn.Close()
+	}
+	return &http.Client{Transport: transport}, closeClient, nil
 }
 
 // quicProbeState records the outcome of a peer's HTTP/3 capability probe.
