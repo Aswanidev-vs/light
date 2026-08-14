@@ -17,8 +17,10 @@ const listenSocketBufferSize = 8 << 20 // 8 MiB
 func transferSocketControl(network, address string, c syscall.RawConn) error {
 	return c.Control(func(fd uintptr) {
 		// Best effort: Windows may clamp these values to the system limit.
+		// TCP_NODELAY is a no-op (ignored) on the QUIC/UDP socket.
 		_ = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, listenSocketBufferSize)
 		_ = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, listenSocketBufferSize)
+		_ = syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
 	})
 }
 
