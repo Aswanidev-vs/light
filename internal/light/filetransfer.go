@@ -66,14 +66,62 @@ type sendControl struct {
 // assemblyState tracks the in-progress reassembly of a segmented (parallel-range)
 // upload for one file on the receiver, keyed by transfer id + filename.
 type assemblyState struct {
-	mu           sync.Mutex
-	totalSize    int64
-	segmentCount int
-	received     int
-	partialPath  string
-	finalPath    string
-	checksum     string
-	failed       bool
+	mu            sync.Mutex
+	totalSize     int64
+	segmentCount  int
+	received      int
+	receivedBytes int64 // total bytes received across all segments (atomic)
+	partialPath   string
+	finalPath     string
+	checksum      string
+	failed        bool
+	started       time.Time
+	lastEmit      time.Time // guarded by mu
+}
+
+// receiveCounter wraps the inbound request body on the receiver so a segmented
+// (parallel-range) upload still reports live progress. Bytes from every
+// concurrent segment accumulate into the shared assemblyState.receivedBytes,
+// giving one monotonic "transferred" total for the whole file.
+type receiveCounter struct {
+	r       io.Reader
+	as      *assemblyState
+	subID   string
+	fname   string
+	emitFn  func(string, any)
+	manager *TransferManager
+}
+
+func (rc *receiveCounter) Read(p []byte) (int, error) {
+	n, err := rc.r.Read(p)
+	if n > 0 {
+		atomic.AddInt64(&rc.as.receivedBytes, int64(n))
+		rc.as.reportProgress(rc.subID, rc.fname, rc.emitFn, rc.manager, false)
+	}
+	return n, err
+}
+
+func (as *assemblyState) reportProgress(subID, fname string, emitFn func(string, any), manager *TransferManager, force bool) {
+	now := time.Now()
+	as.mu.Lock()
+	if !force && now.Sub(as.lastEmit) < progressInterval {
+		as.mu.Unlock()
+		return
+	}
+	as.lastEmit = now
+	as.mu.Unlock()
+	transferred := atomic.LoadInt64(&as.receivedBytes)
+	elapsed := now.Sub(as.started).Seconds()
+	speed := int64(0)
+	if elapsed > 0 {
+		speed = int64(float64(transferred) / elapsed)
+	}
+	manager.UpdateProgress(subID, transferred, speed)
+	if emitFn != nil {
+		emitFn("transfer-progress", map[string]any{
+			"id": subID, "filename": fname, "transferred": transferred, "size": as.totalSize, "speed": speed,
+		})
+	}
 }
 
 // FileTransferService runs a per-device HTTP server that receives files and
@@ -100,6 +148,9 @@ type FileTransferService struct {
 	accepts     map[string]*acceptState
 	controls    map[string]*sendControl
 	cleanedDirs sync.Map
+	// testEmit, when non-nil, captures emitted events in place of the Wails
+	// runtime. Used only by tests; always nil in production.
+	testEmit func(name string, payload any)
 	// assemblies tracks in-progress reassembly of segmented (parallel-range)
 	// uploads on the receiver, keyed by transfer id + filename.
 	assemblies sync.Map
@@ -858,6 +909,7 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 		totalSize:    size,
 		segmentCount: int(segCount),
 		finalPath:    uniquePath(filepath.Join(dl, sanitize(fname))),
+		started:      time.Now(),
 	})
 	as := val.(*assemblyState)
 	as.mu.Lock()
@@ -886,12 +938,15 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 	}
 	buffer := transferBufferPool.Get().([]byte)
 	defer transferBufferPool.Put(buffer)
-	if _, err := io.CopyBuffer(f, r.Body, buffer); err != nil {
+	emitFn := func(name string, p any) { s.emit(p, name) }
+	rc := &receiveCounter{r: r.Body, as: as, subID: subID, fname: fname, emitFn: emitFn, manager: s.manager}
+	if _, err := io.CopyBuffer(f, rc, buffer); err != nil {
 		_ = f.Close()
 		s.failSegment(as, key, partialPath, subID, fname, err.Error())
 		http.Error(w, "read/write error", 400)
 		return
 	}
+	as.reportProgress(subID, fname, emitFn, s.manager, true)
 	// Flush this segment's bytes before the final reassembly hash/rename; the
 	// single-stream path does the same (f.Sync before rename). Syncing any one
 	// handle flushes the whole file, so the completed rename is durable.
@@ -1055,6 +1110,10 @@ func (s *FileTransferService) RejectReceive(transferID string) {
 // ---- helpers ----
 
 func (s *FileTransferService) emit(payload any, name string) {
+	if s.testEmit != nil {
+		s.testEmit(name, payload)
+		return
+	}
 	if s.app != nil {
 		s.app.Event.Emit(name, payload)
 	}
@@ -1130,7 +1189,7 @@ func (c *countingReader) reportProgress(force bool) {
 	c.manager.UpdateProgress(c.subID, transferred, speed)
 	if c.app != nil {
 		c.app.Event.Emit("transfer-progress", map[string]any{
-			"id": c.subID, "filename": c.fname, "transferred": c.sent, "size": c.size, "speed": speed,
+			"id": c.subID, "filename": c.fname, "transferred": transferred, "size": c.size, "speed": speed,
 		})
 	}
 }

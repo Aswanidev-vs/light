@@ -139,6 +139,83 @@ func TestHandleSegmentedTransferConcurrentReassembly(t *testing.T) {
 	}
 }
 
+// TestHandleSegmentedTransferEmitsProgress is a regression test: the segmented
+// (parallel-range) receiver path must emit live "transfer-progress" events so
+// the receiver UI shows the file being transferred, not just a final
+// "transfer-complete". Previously the bytes were copied straight to disk with
+// no progress emission, leaving the receiver blind until completion.
+func TestHandleSegmentedTransferEmitsProgress(t *testing.T) {
+	setHome(t)
+	downloadDir := t.TempDir()
+	defer os.RemoveAll(downloadDir)
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DownloadDir: downloadDir, AutoAccept: true}}
+	receiver := NewFileTransferService(nil, manager, settings, nil)
+
+	var mu sync.Mutex
+	var events []map[string]any
+	receiver.testEmit = func(name string, payload any) {
+		if name != "transfer-progress" {
+			return
+		}
+		mu.Lock()
+		events = append(events, payload.(map[string]any))
+		mu.Unlock()
+	}
+
+	receiver.accepts["seg-prog"] = &acceptState{status: "accepted"}
+
+	const segs = 4
+	segSize := 1 << 20
+	total := int64(segSize * segs)
+	payload := make([]byte, total)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	sum := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(sum[:])
+
+	var wg sync.WaitGroup
+	for i := 0; i < segs; i++ {
+		i := i
+		start := int64(i) * int64(segSize)
+		part := payload[start : start+int64(segSize)]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPut, "/api/transfer", bytes.NewReader(part))
+			setSegmentHeaders(req, "seg-prog", "big.bin", total, start, i, segs)
+			req.Header.Set("X-Checksum-Sha256", checksum)
+			w := httptest.NewRecorder()
+			receiver.handleTransfer(w, req)
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 0 {
+		t.Fatal("expected transfer-progress events on the receiver, got none")
+	}
+	last := int64(0)
+	for _, e := range events {
+		if e["id"] != "seg-prog:big.bin" {
+			t.Fatalf("unexpected event id %v", e["id"])
+		}
+		if e["size"] != total {
+			t.Fatalf("event size = %v, want %d", e["size"], total)
+		}
+		tr := e["transferred"].(int64)
+		if tr < last {
+			t.Fatalf("transferred went backwards: %d < %d", tr, last)
+		}
+		last = tr
+	}
+	if last != total {
+		t.Fatalf("final transferred = %d, want %d", last, total)
+	}
+}
+
 // TestHandleSegmentedTransferChecksumMismatch verifies that a wrong declared
 // checksum fails the final reassembly and leaves no partial artifact behind.
 func TestHandleSegmentedTransferChecksumMismatch(t *testing.T) {
