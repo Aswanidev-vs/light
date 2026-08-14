@@ -2,7 +2,9 @@
 
 This document describes behavior implemented in the current codebase. It is
 kept separate from the roadmap so planned work is not presented as a shipped
-feature.
+feature. Where a platform capability exists in the native/runtime layer but is
+not currently used by the Light UI, it is labelled as an API/runtime feature
+instead of a user-facing feature.
 
 ## File sharing
 
@@ -10,15 +12,19 @@ feature.
 - Plain HTTP over TCP is the stable default transport.
 - Configurable transfer server port; the default is `9120`.
 - Multiple files can be selected in one transfer request and uploaded with up
-  to four concurrent workers.
+  to four concurrent workers on desktop and two on mobile.
 - Every Light instance can send and receive. Incoming sender identity and
   address are remembered locally so the receiver can use the Share back action
   or select that peer from the Send view.
+- A batch continues processing other files when an individual file fails, and
+  reports the failed files together at the end.
 - Streaming progress events with transferred bytes, percentage, speed, and
   status.
 - Active outgoing transfers support pause, resume, and cancel.
 - Incoming transfers can be accepted or declined. Auto-accept is available in
   Settings.
+- A receiver acceptance request waits for up to two minutes before the sender
+  marks the batch rejected or timed out.
 - Destination names are sanitized and made collision-safe instead of
   overwriting an existing file.
 - Sender-provided file size and SHA-256 checksum are sent with each upload.
@@ -39,6 +45,10 @@ resumed after an application restart or a broken network connection.
   device type.
 - QR scanning through the browser `BarcodeDetector` API with a `jsQR`
   fallback.
+- Explicitly paired peers are remembered in browser local storage and remain
+  available for reverse sharing after their discovery beacon expires.
+- Refreshing discovery rebuilds broadcast senders so changed Wi-Fi or Ethernet
+  interfaces are picked up without restarting the app.
 - Discovery diagnostics expose the local ID, listener state, interface count,
   sender count, peer count, and the last discovery error.
 
@@ -57,6 +67,8 @@ and transfer port are reachable. It does not create a network path by itself.
   used.
 - Android picker copies and stale picker cache entries are cleaned after file
   selection and during app startup.
+- Android selected files are copied into an app cache before Go receives paths;
+  only that owned picker cache is removed during cleanup.
 
 ## History
 
@@ -71,8 +83,11 @@ and transfer port are reachable. It does not create a network path by itself.
 - LAN device list with desktop/mobile icons and live status indicators.
 - Drag-and-drop and native file picker support for sending files.
 - Incoming transfer dialog with file names and sizes.
+- Incoming requests support selecting individual files before accepting.
 - Transfer cards with progress, speed, status, pause/resume, and cancel
   controls.
+- Pull-to-refresh and button refresh for the nearby-device list, toast feedback,
+  and a Share back action for the last incoming peer.
 - Responsive desktop, tablet, and mobile layouts with a desktop sidebar,
   tablet navigation rail, mobile header, and mobile bottom navigation.
 - Safe-area-aware mobile dialogs, notifications, and navigation for devices
@@ -85,9 +100,16 @@ and transfer port are reachable. It does not create a network path by itself.
 - Download folder.
 - Transfer port.
 - Auto-accept incoming files.
-- Experimental transport toggle.
+- Experimental QUIC/HTTP-3 transport toggle.
+- Experimental Wi-Fi Direct toggle when the platform reports support.
+- Android SAF folder URI, stored separately from its human-readable folder
+  label.
 - Settings and device identity persist in the app's `.light` configuration
   directory.
+
+The persisted settings model also contains `enableEncryption` for compatibility,
+but the current transfer path does not use it and the current Settings view does
+not expose it.
 
 ## Experimental QUIC transport
 
@@ -98,19 +120,68 @@ and transfer port are reachable. It does not create a network path by itself.
   fallback to TCP before the prepare request and file body are sent.
 - QUIC uses an ephemeral self-signed certificate. Traffic is encrypted, but
   peer identity is not authenticated by a trust store yet.
+- The QUIC capability probe is cached per peer for 60 seconds, and the server
+  keeps TCP available if UDP/QUIC setup fails.
 - QUIC is experimental and is not guaranteed to be faster than TCP on every
   Wi-Fi, Ethernet, storage, or operating-system combination.
+
+## Wi-Fi Direct implementation status
+
+- Platform managers are implemented for Android (`WifiP2pManager`), Windows
+  (WinRT `WiFiDirectDevice`), and Linux (`wpa_cli`/`wpa_supplicant`). macOS
+  returns unsupported because it does not expose a compatible raw Wi-Fi Direct
+  API.
+- The managers discover peers, form a P2P group, return the negotiated transfer
+  address, and tear the group down. The existing HTTP/TCP or optional QUIC
+  transfer stack is reused after a link is established.
+- Android uses a JNI bridge between Go and the Java host, requests
+  `NEARBY_WIFI_DEVICES` on Android 13+ or location permission on older releases,
+  and listens for peer and connection-info broadcasts.
+- The `wifiDirect` setting and generated `DiscoveryService` APIs are present,
+  but the current frontend does not yet call `WifiDirectPeers` or
+  `ConnectWifiDirect`. The visible toggle therefore represents backend support,
+  not a complete end-to-end Wi-Fi Direct peer-selection flow.
+
+## Android native/runtime implementation
+
+The Android host provides the following implemented runtime capabilities to the
+Wails application. These are available through the native bridge; not all are
+currently used by Light's feature screens.
+
+- WebView asset serving, JavaScript/runtime message dispatch, Go lifecycle
+  callbacks, main-thread dispatch, and low-memory/page-finished notifications.
+- Native file and folder pickers, multi-file selection, persistable Storage
+  Access Framework permissions, staged downloads, URI-backed destination copies,
+  and safe picker-cache cleanup.
+- Screen/device/app information, dark-mode detection, safe-area insets,
+  orientation control, status-bar control, brightness control, clipboard,
+  share chooser, external URL opening, toast messages, keep-awake, torch, and
+  vibration/haptic feedback.
+- Biometric/device-credential authentication and encrypted key-value storage
+  backed by AndroidX `EncryptedSharedPreferences`.
+- Local notifications with Android 13 notification-permission handling and a
+  sticky data-sync foreground service for work that must keep the process alive
+  in the background.
+- Camera photo/video capture with cache-backed thumbnails and range-enabled
+  WebView streaming, plus location, motion, proximity, text-to-speech, storage,
+  power, and network information/event bridges.
+- Wi-Fi multicast locking so UDP LAN discovery can receive packets while the
+  Android app is running.
 
 ## Platform support
 
 - Go 1.25 backend with Wails v3.
 - Vue 3, TypeScript, Vite, and Tailwind CSS frontend.
-- The project contains Wails desktop and mobile build configuration. The
-  current GitHub workflow builds Windows and Android artifacts for releases.
+- Android uses a WebView host with `minSdk 23`, `targetSdk 35`, and NDK
+  `26.3.11579264`.
+- The current GitHub workflow builds Windows and Android artifacts for releases;
+  Android produces arm64-v8a and x86_64 binaries.
 
 ## Not currently implemented
 
-- Native Wi-Fi Direct connection management.
+- A complete user-facing Wi-Fi Direct peer discovery/connect flow; the native
+  platform adapters and backend APIs exist, but the current frontend does not
+  invoke them yet.
 - Automatic hotspot creation or network switching.
 - Resume-after-restart or chunk-level resume for interrupted files.
 - PIN-based transfer authentication.

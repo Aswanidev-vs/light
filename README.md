@@ -64,20 +64,20 @@ go test ./internal/light -run '^$' -bench '^BenchmarkTransferTransport$' -bencht
 
 ## Experimental Wi-Fi Direct
 
-TCP/QUIC remains the stable default transport. The `wifiDirect` setting is an
-opt-in toggle in Settings (default off). When enabled for a peer, Light forms a
-private Wi-Fi Direct (P2P) group with that peer so transfers run over the
-direct link instead of the shared LAN.
+TCP/QUIC remains the stable default transport. The repository contains
+experimental Wi-Fi Direct platform adapters and backend APIs, and the
+`wifiDirect` setting is persisted as an opt-in toggle (default off). The
+current frontend does not yet expose a peer scan/connect flow for those APIs,
+so normal user transfers continue to use LAN discovery or QR-paired addresses.
 
 Wi-Fi Direct is orthogonal to the QUIC/TCP transport choice: it decides *which
 network* the transfer uses, while `transportMode` decides *which protocol* runs
-over it. If group formation fails, Light silently falls back to normal LAN
-discovery and transfer; peers found via Wi-Fi Direct then appear in the device
-list exactly like LAN peers.
+over it. The native adapters can return a P2P transfer address for the existing
+HTTP/TCP or QUIC stack, but end-to-end UI integration remains unfinished.
 
 Supported platforms (experimental):
 
-- **Android** and **Windows** are supported experimentally. Android uses
+- **Android** and **Windows** have experimental backend support. Android uses
   `WifiP2pManager`; Windows uses the WinRT `WiFiDirectDevice` API, which
   requires the app's `Proximity` capability.
 - **Linux** uses `wpa_supplicant` P2P when available.
@@ -194,7 +194,7 @@ Settings are stored in `~/.light/settings.json`:
 | `autoAccept` | false | Accept incoming files without prompting |
 | `theme` | dark | UI theme (dark only for now) |
 | `transportMode` | tcp | `tcp` for the stable path, or `quic` to try HTTP/3 first and fall back to TCP |
-| `wifiDirect` | false | `false` for the stable path, or `true` to try forming a Wi-Fi Direct group with peers (experimental; falls back to LAN) |
+| `wifiDirect` | false | Enables the experimental Wi-Fi Direct backend; the current frontend does not yet expose peer scan/connect controls |
 
 ## Architecture
 
