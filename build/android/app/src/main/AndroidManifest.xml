@@ -10,6 +10,14 @@
     <!-- Allow UDP multicast discovery packets on Wi-Fi. Android otherwise
          filters multicast even when both devices are on the same SSID. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- Wi-Fi Direct (P2P): NEARBY_WIFI_DEVICES replaces the location requirement
+         on API 33+, while CHANGE_WIFI_STATE / ACCESS_WIFI_STATE are needed to
+         manage the Wi-Fi stack. See wifidirect_android.go. -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="33" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

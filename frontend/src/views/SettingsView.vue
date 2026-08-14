@@ -10,6 +10,11 @@ import Icon from '../components/common/Icon.vue'
 const { settings } = useSettings()
 const { toast } = useUI()
 
+const wifiDirectSupported = ref(true)
+SettingsService.WifiDirectSupported().then((v) => {
+  wifiDirectSupported.value = v
+})
+
 const local = ref({ ...settings.value })
 watch(settings, () => {
   local.value = { ...settings.value }
@@ -176,6 +181,29 @@ onUnmounted(() => {
           <span
             class="toggle-thumb"
             :class="local.autoAccept ? 'toggle-thumb--on' : ''"
+          />
+        </button>
+      </div>
+
+      <!-- Wi-Fi Direct -->
+      <div
+        v-if="wifiDirectSupported"
+        class="flex items-center justify-between rounded-lg border border-white/5 bg-surface-0 px-4 py-4"
+      >
+        <div>
+          <div class="text-sm font-medium">Wi-Fi Direct</div>
+          <div class="text-xs text-content-faint">Form a private P2P link with a peer for transfers</div>
+        </div>
+        <button
+          class="toggle"
+          :class="local.wifiDirect ? 'toggle--on' : ''"
+          :aria-pressed="local.wifiDirect"
+          aria-label="Toggle Wi-Fi Direct"
+          @click="local.wifiDirect = !local.wifiDirect"
+        >
+          <span
+            class="toggle-thumb"
+            :class="local.wifiDirect ? 'toggle-thumb--on' : ''"
           />
         </button>
       </div>

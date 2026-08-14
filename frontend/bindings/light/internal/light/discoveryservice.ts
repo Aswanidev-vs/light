@@ -28,6 +28,16 @@ import * as application$0 from "../../../github.com/wailsapp/wails/v3/pkg/applic
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
+/**
+ * ConnectWifiDirect forms a P2P group with the peer and records its transfer
+ * address in the device table so the existing HTTP/QUIC path can use it. It
+ * falls back to returning ErrWifiDirectUnsupported when the platform cannot host
+ * a link, leaving normal LAN discovery untouched.
+ */
+export function ConnectWifiDirect(peerID: string): $CancellablePromise<string> {
+    return $Call.ByID(433749557, peerID);
+}
+
 export function Diagnostics(): $CancellablePromise<$models.Diagnostics> {
     return $Call.ByID(4146114391).then(($result: any) => {
         return $$createType0($result);
@@ -71,6 +81,15 @@ export function SetApp(app: application$0.App | null): $CancellablePromise<void>
     return $Call.ByID(2953749430, app);
 }
 
+/**
+ * SetWifiDirectManager injects the platform Wi-Fi Direct backend. It is created
+ * lazily by WifiDirectPeers/ConnectWifiDirect when the setting is enabled, but
+ * can also be wired explicitly at startup.
+ */
+export function SetWifiDirectManager(m: $models.WifiDirectManager): $CancellablePromise<void> {
+    return $Call.ByID(2341060054, m);
+}
+
 export function Start(): $CancellablePromise<void> {
     return $Call.ByID(3889309759);
 }
@@ -79,8 +98,21 @@ export function Stop(): $CancellablePromise<void> {
     return $Call.ByID(3127683269);
 }
 
+/**
+ * WifiDirectPeers returns nearby devices discovered via Wi-Fi Direct, or nil when
+ * the feature is disabled or unsupported. The transfer stack reuses the existing
+ * device table, so no transport changes are needed.
+ */
+export function WifiDirectPeers(): $CancellablePromise<$models.WifiDirectPeer[]> {
+    return $Call.ByID(309302474).then(($result: any) => {
+        return $$createType5($result);
+    });
+}
+
 // Private type creation functions
 const $$createType0 = $models.Diagnostics.createFrom;
 const $$createType1 = $models.Device.createFrom;
 const $$createType2 = $Create.Array($$createType1);
 const $$createType3 = $Create.Nullable($$createType1);
+const $$createType4 = $models.WifiDirectPeer.createFrom;
+const $$createType5 = $Create.Array($$createType4);

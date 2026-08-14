@@ -21,5 +21,10 @@ export {
     Settings,
     Transfer,
     TransferRequest,
-    TransferStatus
+    TransferStatus,
+    WifiDirectPeer
+} from "./models.js";
+
+export type {
+    WifiDirectManager
 } from "./models.js";
