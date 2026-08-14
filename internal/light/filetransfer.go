@@ -361,7 +361,10 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	// under scoped storage); the frontend then bridges the finished file into
 	// the chosen folder via the SAF tree URI.
 	dest := s.settings.GetSettings().DownloadDir
-	f, err := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY, 0o644)
+	// Single-stream transfers always start at offset 0 (the segmented path
+	// handles ranged writes). Truncate any leftover partial so a retried request
+	// can't leave stale trailing bytes behind.
+	f, err := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		http.Error(w, "cannot open destination ("+dl+"): "+err.Error(), 500)
 		return
@@ -373,13 +376,6 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 			_ = os.Remove(partialPath)
 		}
 	}()
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			s.failTransfer(tid+":"+fname, fname, err.Error())
-			http.Error(w, "cannot seek destination: "+err.Error(), 500)
-			return
-		}
-	}
 
 	subID := tid + ":" + fname
 	s.manager.RecordTransfer(&Transfer{ID: subID, Filename: fname, Size: size, Status: StatusActive})
@@ -896,6 +892,10 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 		http.Error(w, "read/write error", 400)
 		return
 	}
+	// Flush this segment's bytes before the final reassembly hash/rename; the
+	// single-stream path does the same (f.Sync before rename). Syncing any one
+	// handle flushes the whole file, so the completed rename is durable.
+	_ = f.Sync()
 	_ = f.Close()
 
 	as.mu.Lock()
