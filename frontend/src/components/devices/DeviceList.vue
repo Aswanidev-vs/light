@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useDiscovery } from '../../composables/useDiscovery'
 import { useUI } from '../../composables/useUI'
 import DeviceCard from './DeviceCard.vue'
+import WifiDirectPanel from './WifiDirectPanel.vue'
 import Icon from '../common/Icon.vue'
 
 const { devices, selectedId, select, refresh, refreshing } = useDiscovery()
@@ -97,5 +98,7 @@ async function refreshDevices() {
         @select="select"
       />
     </div>
+
+    <WifiDirectPanel class="mt-1" />
   </div>
 </template>

@@ -33,6 +33,13 @@ type WifiDirectManager interface {
 // Wi-Fi Direct link (notably macOS, which only exposes MultipeerConnectivity).
 var ErrWifiDirectUnsupported = errors.New("wifi-direct: not supported on this platform")
 
+// ErrWifiDirectGroupOwner is returned when group formation succeeded but this
+// device became the group owner: the peer's address is only learned when the
+// peer connects to us, so the transfer works the other direction around. Once
+// the group is up, normal LAN discovery (UDP beacons) flows across the P2P
+// link too, so the peer shows up in the regular device list.
+var ErrWifiDirectGroupOwner = errors.New("wifi-direct: this device became the group owner; start the transfer from the other device")
+
 // NewWifiDirectManager returns a platform manager when WifiDirect is enabled, or
 // nil when disabled / unsupported so callers fall back to LAN discovery.
 func NewWifiDirectManager(enabled bool) (WifiDirectManager, error) {

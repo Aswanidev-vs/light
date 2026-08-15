@@ -15,6 +15,7 @@ const statusLabel: Record<string, string> = {
   pending: 'Waiting',
   active: 'Sending',
   paused: 'Paused',
+  saving: 'Saving',
   completed: 'Done',
   failed: 'Failed',
   cancelled: 'Cancelled',
@@ -37,7 +38,7 @@ const statusLabel: Record<string, string> = {
         <span v-if="transfer.status === 'failed'" class="w-full break-words text-danger">{{ transfer.error }}</span>
       </div>
       <div class="mt-2">
-        <ProgressBar :percent="transfer.percent" :active="transfer.status === 'active'" :failed="transfer.status === 'failed'" />
+        <ProgressBar :percent="transfer.percent" :active="transfer.status === 'active' || transfer.status === ('saving' as any)" :failed="transfer.status === 'failed'" />
       </div>
     </div>
     <div class="col-start-2 flex items-center gap-1 sm:col-start-auto">

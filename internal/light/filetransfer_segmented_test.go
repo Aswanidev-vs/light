@@ -260,6 +260,112 @@ func TestHandleSegmentedTransferChecksumMismatch(t *testing.T) {
 	}
 }
 
+// TestHandleSegmentedTransferSegmentDigestMismatch verifies that a segment whose
+// in-stream digest disagrees with the sender's declared X-Segment-Digest is
+// rejected immediately (no whole-file read-back needed) and the assembly fails.
+func TestHandleSegmentedTransferSegmentDigestMismatch(t *testing.T) {
+	setHome(t)
+	downloadDir := t.TempDir()
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DownloadDir: downloadDir, AutoAccept: true}}
+	receiver := NewFileTransferService(nil, manager, settings, nil)
+	receiver.accepts["seg-dig-mm"] = &acceptState{status: "accepted"}
+
+	partA := bytes.Repeat([]byte("A"), 1<<20)
+	partB := bytes.Repeat([]byte("B"), 1<<20)
+	total := int64(len(partA) + len(partB))
+	sumB := sha256.Sum256(partB)
+
+	// Segment 0 carries a declared digest that matches a different payload, so
+	// the in-stream comparison fails as segment 0 lands.
+	req0 := httptest.NewRequest(http.MethodPut, "/api/transfer", bytes.NewReader(partA))
+	setSegmentHeaders(req0, "seg-dig-mm", "file.bin", total, 0, 0, 2)
+	req0.Header.Set("X-Checksum-Sha256", hex.EncodeToString(sumB[:]))
+	req0.Header.Set("X-Segment-Digest", strings.Repeat("1", 64))
+	w0 := httptest.NewRecorder()
+	receiver.handleTransfer(w0, req0)
+	if w0.Code != http.StatusBadRequest {
+		t.Fatalf("digest-mismatch segment status = %d, want 400", w0.Code)
+	}
+
+	// The sibling segment arriving late must also be rejected, not spawn a new
+	// assembly for the same failed transfer.
+	req1 := httptest.NewRequest(http.MethodPut, "/api/transfer", bytes.NewReader(partB))
+	setSegmentHeaders(req1, "seg-dig-mm", "file.bin", total, int64(len(partA)), 1, 2)
+	req1.Header.Set("X-Checksum-Sha256", hex.EncodeToString(sumB[:]))
+	req1.Header.Set("X-Segment-Digest", hex.EncodeToString(sumB[:]))
+	w1 := httptest.NewRecorder()
+	receiver.handleTransfer(w1, req1)
+	if w1.Code != http.StatusBadRequest {
+		t.Fatalf("late sibling segment status = %d, want 400", w1.Code)
+	}
+
+	entries, _ := os.ReadDir(downloadDir)
+	if len(entries) != 0 {
+		t.Fatalf("partial not cleaned up: %v", entries)
+	}
+	history := manager.GetHistory(2)
+	if len(history) != 1 || history[0].Status != StatusFailed {
+		t.Fatalf("history = %#v, want one failed transfer", history)
+	}
+	if _, still := receiver.assemblies.Load("seg-dig-mm\x00file.bin"); still {
+		t.Fatal("failed assembly was not removed after every segment landed")
+	}
+}
+
+// TestHandleSegmentedTransferDigestSkipReadBack verifies a segmented transfer
+// whose sender declares per-segment digests finalizes with the sender's
+// whole-file checksum (the trusted path, no read-back hash).
+func TestHandleSegmentedTransferDigestSkipReadBack(t *testing.T) {
+	setHome(t)
+	downloadDir := t.TempDir()
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DownloadDir: downloadDir, AutoAccept: true}}
+	receiver := NewFileTransferService(nil, manager, settings, nil)
+	receiver.accepts["seg-dig-ok"] = &acceptState{status: "accepted"}
+
+	partA := bytes.Repeat([]byte("A"), 1<<20)
+	partB := bytes.Repeat([]byte("B"), 1<<20)
+	total := int64(len(partA) + len(partB))
+	whole := append(append([]byte{}, partA...), partB...)
+	sumWhole := sha256.Sum256(whole)
+	sumA := sha256.Sum256(partA)
+	sumB := sha256.Sum256(partB)
+
+	send := func(part []byte, start int64, idx int, digest string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/api/transfer", bytes.NewReader(part))
+		setSegmentHeaders(req, "seg-dig-ok", "dig.bin", total, start, idx, 2)
+		req.Header.Set("X-Checksum-Sha256", hex.EncodeToString(sumWhole[:]))
+		req.Header.Set("X-Segment-Digest", digest)
+		w := httptest.NewRecorder()
+		receiver.handleTransfer(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("segment %d status = %d, want 200", idx, w.Code)
+		}
+		if idx == 1 {
+			body := w.Body.String()
+			if body != "ok "+hex.EncodeToString(sumWhole[:]) {
+				t.Fatalf("finalize response = %q, want sender's whole-file checksum", body)
+			}
+		}
+	}
+	send(partA, 0, 0, hex.EncodeToString(sumA[:]))
+	send(partB, int64(len(partA)), 1, hex.EncodeToString(sumB[:]))
+
+	got, err := os.ReadFile(filepath.Join(downloadDir, "dig.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, whole) {
+		t.Fatal("reassembled file mismatch")
+	}
+	history := manager.GetHistory(1)
+	if len(history) != 1 || history[0].Status != StatusCompleted || history[0].Checksum != hex.EncodeToString(sumWhole[:]) {
+		t.Fatalf("history = %#v, want completed transfer with whole-file checksum", history)
+	}
+}
+
 // TestHandleTransferTruncatesStalePartial confirms a fresh single-stream
 // transfer overwrites any leftover partial instead of appending to it.
 func TestHandleTransferTruncatesStalePartial(t *testing.T) {

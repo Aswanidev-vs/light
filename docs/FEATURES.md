@@ -136,11 +136,18 @@ not expose it.
   transfer stack is reused after a link is established.
 - Android uses a JNI bridge between Go and the Java host, requests
   `NEARBY_WIFI_DEVICES` on Android 13+ or location permission on older releases,
-  and listens for peer and connection-info broadcasts.
-- The `wifiDirect` setting and generated `DiscoveryService` APIs are present,
-  but the current frontend does not yet call `WifiDirectPeers` or
-  `ConnectWifiDirect`. The visible toggle therefore represents backend support,
-  not a complete end-to-end Wi-Fi Direct peer-selection flow.
+  and listens for peer and connection-info broadcasts. P2P system receivers are
+  registered with `RECEIVER_EXPORTED` on API 26+, and discovery/connect calls
+  are dispatched to the UI thread before touching `WifiP2pManager`.
+- When this device ends up as the group owner, the negotiated IP is its own;
+  the connection-info callback reports an `owner` flag so Go returns the
+  group-owner error instead of trying to transfer to itself. The frontend then
+  tells the user to start the transfer from the other device (regular LAN
+  beacons still flow across the fresh link).
+- The `wifiDirect` setting toggles a full end-to-end flow: the Send view shows a
+  Wi-Fi Direct panel that scans via `WifiDirectPeers`, connects via
+  `ConnectWifiDirect(peerID, peerName)`, injects the peer into the device list
+  (persisted past beacon expiry), and tears the group down on disconnect.
 
 ## Android native/runtime implementation
 
@@ -179,9 +186,6 @@ currently used by Light's feature screens.
 
 ## Not currently implemented
 
-- A complete user-facing Wi-Fi Direct peer discovery/connect flow; the native
-  platform adapters and backend APIs exist, but the current frontend does not
-  invoke them yet.
 - Automatic hotspot creation or network switching.
 - Resume-after-restart or chunk-level resume for interrupted files.
 - PIN-based transfer authentication.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,6 +17,12 @@ const (
 	announceInterval = 3 * time.Second
 	deviceTTL        = 10 * time.Second
 	pairingCodeTTL   = 5 * time.Minute
+
+	// Wi-Fi Direct scans/connections bound for the platform managers need their
+	// own deadlines: the Wails-injected request context has none, and a missing
+	// peer-list callback (Android) must not hang the bound call forever.
+	wifiDirectDiscoverTimeout = 20 * time.Second
+	wifiDirectConnectTimeout  = 60 * time.Second
 )
 
 // beacon is the UDP presence advertisement sent on the LAN.
@@ -44,11 +51,14 @@ type DiscoveryService struct {
 	settings *SettingsService
 	wfd      WifiDirectManager // optional Wi-Fi Direct backend; nil when disabled/unsupported
 
-	mu       sync.RWMutex
-	devices  map[string]*Device
-	code     string
-	codeExp  time.Time
-	selfType DeviceType
+	mu sync.RWMutex
+	// wfdDevices holds the IDs of peers injected via Wi-Fi Direct. They never
+	// emit LAN beacons, so expireLoop must not drop them on the beacon TTL.
+	wfdDevices map[string]struct{}
+	devices    map[string]*Device
+	code       string
+	codeExp    time.Time
+	selfType   DeviceType
 
 	conn    *net.UDPConn
 	senders []*net.UDPConn
@@ -61,11 +71,12 @@ type DiscoveryService struct {
 
 func NewDiscoveryService(app *application.App, settings *SettingsService) *DiscoveryService {
 	return &DiscoveryService{
-		app:      app,
-		settings: settings,
-		devices:  make(map[string]*Device),
-		selfType: PlatformDeviceType(),
-		stopChan: make(chan struct{}),
+		app:        app,
+		settings:   settings,
+		devices:    make(map[string]*Device),
+		wfdDevices: make(map[string]struct{}),
+		selfType:   PlatformDeviceType(),
+		stopChan:   make(chan struct{}),
 	}
 }
 
@@ -100,14 +111,19 @@ func (d *DiscoveryService) WifiDirectPeers(ctx context.Context) ([]WifiDirectPee
 		d.wfd = m
 		d.mu.Unlock()
 	}
-	return m.Discover(ctx)
+	scanCtx, cancel := context.WithTimeout(ctx, wifiDirectDiscoverTimeout)
+	defer cancel()
+	return m.Discover(scanCtx)
 }
 
 // ConnectWifiDirect forms a P2P group with the peer and records its transfer
 // address in the device table so the existing HTTP/QUIC path can use it. It
 // falls back to returning ErrWifiDirectUnsupported when the platform cannot host
 // a link, leaving normal LAN discovery untouched.
-func (d *DiscoveryService) ConnectWifiDirect(ctx context.Context, peerID string) (string, error) {
+//
+// peerName is the display name reported by discovery; it seeds the injected
+// device so it renders meaningfully before any beacon refreshes it.
+func (d *DiscoveryService) ConnectWifiDirect(ctx context.Context, peerID, peerName string) (string, error) {
 	d.mu.RLock()
 	m := d.wfd
 	d.mu.RUnlock()
@@ -121,9 +137,17 @@ func (d *DiscoveryService) ConnectWifiDirect(ctx context.Context, peerID string)
 		d.wfd = m
 		d.mu.Unlock()
 	}
-	addr, err := m.Connect(ctx, peerID)
+	connectCtx, cancel := context.WithTimeout(ctx, wifiDirectConnectTimeout)
+	defer cancel()
+	addr, err := m.Connect(connectCtx, peerID)
 	if err != nil {
 		return "", err
+	}
+	// The platform managers return the default transfer port; honour the
+	// user-configured port instead (0 = uninitialised settings, keep returned).
+	host, _, derr := net.SplitHostPort(addr)
+	if port := d.settings.GetSettings().Port; derr == nil && host != "" && port > 0 {
+		addr = net.JoinHostPort(host, strconv.Itoa(port))
 	}
 	d.mu.Lock()
 	existing, ok := d.devices[peerID]
@@ -131,13 +155,41 @@ func (d *DiscoveryService) ConnectWifiDirect(ctx context.Context, peerID string)
 		existing = &Device{ID: peerID}
 		d.devices[peerID] = existing
 	}
+	if peerName != "" {
+		existing.Name = peerName
+	}
+	if existing.Name == "" {
+		// The platform did not report a display name; give the UI something
+		// to render rather than an empty row.
+		existing.Name = "Wi-Fi Direct peer"
+	}
 	existing.Address = addr
 	existing.LastSeen = time.Now()
+	d.wfdDevices[peerID] = struct{}{}
 	d.mu.Unlock()
 	if d.app != nil {
 		d.app.Event.Emit("device-found", *existing)
 	}
 	return addr, nil
+}
+
+// DisconnectWifiDirect tears down the active P2P group (if one exists) and
+// forgets the peer that was injected via ConnectWifiDirect, emitting
+// device-lost so the UI drops it. Leaving the group formed would keep the
+// peer's Wi-Fi radio in P2P mode, so this is the user's way back to LAN mode.
+func (d *DiscoveryService) DisconnectWifiDirect(ctx context.Context, peerID string) {
+	d.mu.Lock()
+	delete(d.devices, peerID)
+	delete(d.wfdDevices, peerID)
+	m := d.wfd
+	d.mu.Unlock()
+
+	if m != nil {
+		_ = m.Close()
+	}
+	if d.app != nil {
+		d.app.Event.Emit("device-lost", map[string]string{"id": peerID})
+	}
 }
 
 func (d *DiscoveryService) Start() error {
@@ -256,6 +308,11 @@ func (d *DiscoveryService) expireLoop() {
 			var expired []string
 			d.mu.Lock()
 			for id, dev := range d.devices {
+				// Peers added via Wi-Fi Direct never emit LAN beacons; they
+				// stay in the device table until explicitly forgotten.
+				if _, p2p := d.wfdDevices[id]; p2p {
+					continue
+				}
 				if now.Sub(dev.LastSeen) > deviceTTL {
 					expired = append(expired, id)
 					delete(d.devices, id)
