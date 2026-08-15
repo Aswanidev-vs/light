@@ -163,6 +163,28 @@ public class WailsJSBridge {
     }
 
     /**
+     * Hold the Wi-Fi radio in high-performance mode while transfers run.
+     * Called from JavaScript: wails.acquireTransferWifiLock() / wails.releaseTransferWifiLock()
+     */
+    @JavascriptInterface
+    public void acquireTransferWifiLock() {
+        webView.post(() -> {
+            if (webView.getContext() instanceof MainActivity) {
+                ((MainActivity) webView.getContext()).acquireTransferWifiLock();
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void releaseTransferWifiLock() {
+        webView.post(() -> {
+            if (webView.getContext() instanceof MainActivity) {
+                ((MainActivity) webView.getContext()).releaseTransferWifiLock();
+            }
+        });
+    }
+
+    /**
      * Send a callback response to JavaScript
      */
     private void sendCallback(String callbackId, String result, String error) {

@@ -15,6 +15,7 @@ import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -49,9 +50,13 @@ import java.io.FileOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * MainActivity hosts the WebView and manages the Wails application lifecycle.
@@ -66,7 +71,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int FILE_PICKER_REQUEST = 7001;
     private static final int WEB_FILE_PICKER_REQUEST = 7004;
     private static final int FOLDER_PICKER_REQUEST = 7005;
-    private static final int FILE_COPY_BUFFER_SIZE = 1 << 20;
+    private static final int FILE_COPY_BUFFER_SIZE = 4 << 20;
 
     private WebView webView;
     private WailsBridge bridge;
@@ -85,6 +90,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean systemReceiversRegistered = false;
     private WebViewAssetLoader assetLoader;
     private WifiManager.MulticastLock discoveryMulticastLock;
+    private WifiManager.WifiLock transferWifiLock;
 
     // The Go-side dialog ID of the in-flight file picker (-1 when idle)
     private int pendingFilePickerCallbackID = -1;
@@ -147,6 +153,25 @@ public class MainActivity extends AppCompatActivity {
             discoveryMulticastLock.release();
         }
         discoveryMulticastLock = null;
+    }
+
+    /** Keep the Wi-Fi radio out of power-save mode while a transfer is in flight;
+     * otherwise the radio downshifts with the screen off and caps throughput. */
+    public void acquireTransferWifiLock() {
+        WifiManager wifi = (WifiManager) getApplicationContext()
+                .getSystemService(Context.WIFI_SERVICE);
+        if (wifi == null) return;
+        if (transferWifiLock == null) {
+            transferWifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "light-transfer");
+            transferWifiLock.setReferenceCounted(false);
+        }
+        if (!transferWifiLock.isHeld()) transferWifiLock.acquire();
+    }
+
+    public void releaseTransferWifiLock() {
+        if (transferWifiLock != null && transferWifiLock.isHeld()) {
+            transferWifiLock.release();
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -549,8 +574,10 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Copy a finished download (staged in app-internal storage by the Go
      * receiver) into the SAF folder the user picked. Creates the document via
-     * the persisted tree URI, streams the bytes through ContentResolver, then
-     * deletes the staging file. json: {"uri","fileName","sourcePath"}.
+     * the persisted tree URI, streams the bytes into it over FileChannels
+     * (zero-copy on supported kernels) while emitting android:copyProgress
+     * events, then deletes the staging file.
+     * json: {"uri","fileName","sourcePath","transferId"}.
      */
     public void copyToFolder(final String json) {
         new Thread(() -> {
@@ -560,6 +587,7 @@ public class MainActivity extends AppCompatActivity {
                 Uri treeUri = Uri.parse(o.getString("uri"));
                 String fileName = o.optString("fileName", "file");
                 java.io.File source = new java.io.File(o.getString("sourcePath"));
+                String transferId = o.optString("transferId", "");
                 if (!source.exists()) {
                     bridge.emitEvent("android:copyDone",
                             "{\"ok\":false,\"error\":" + JSONObject.quote("staging file missing") + "}");
@@ -588,22 +616,13 @@ public class MainActivity extends AppCompatActivity {
                     throw new IllegalStateException("could not create destination file");
                 }
 
-                try (InputStream in = new FileInputStream(source);
-                     OutputStream out = getContentResolver().openOutputStream(createdDocument)) {
-                    if (out == null) {
-                        throw new IllegalStateException("cannot open destination");
-                    }
-                    byte[] buf = new byte[FILE_COPY_BUFFER_SIZE];
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                    }
-                }
+                copyFileWithProgress(source, createdDocument, transferId);
                 // Staging copy is no longer needed.
                 boolean deleted = source.delete();
                 bridge.emitEvent("android:copyDone",
                         "{\"ok\":true,\"fileName\":" + JSONObject.quote(fileName)
-                                + ",\"deleted\":" + deleted + "}");
+                                + ",\"deleted\":" + deleted
+                                + ",\"id\":" + JSONObject.quote(transferId) + "}");
             } catch (Exception e) {
                 if (createdDocument != null) {
                     try {
@@ -618,6 +637,40 @@ public class MainActivity extends AppCompatActivity {
                                 + JSONObject.quote(e.getMessage() != null ? e.getMessage() : "copy failed") + "}");
             }
         }).start();
+    }
+
+    /**
+     * Stream source into a SAF-created document over FileChannels (splice-backed
+     * on Linux/Android kernels), emitting android:copyProgress events so the UI
+     * shows the SAF move instead of sitting at 100%.
+     */
+    private void copyFileWithProgress(File source, Uri document, String transferId) throws java.io.IOException {
+        ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(document, "w");
+        if (pfd == null) throw new IllegalStateException("cannot open destination");
+        try (FileChannel in = new FileInputStream(source).getChannel();
+             FileChannel out = new ParcelFileDescriptor.AutoCloseOutputStream(pfd).getChannel()) {
+            long total = in.size();
+            long copied = 0;
+            long lastEmitAt = 0;
+            while (copied < total) {
+                long n = in.transferTo(copied, 8L << 20, out);
+                if (n <= 0) break;
+                copied += n;
+                long now = System.currentTimeMillis();
+                if (!transferId.isEmpty() && now - lastEmitAt >= 200) {
+                    lastEmitAt = now;
+                    bridge.emitEvent("android:copyProgress",
+                            "{\"id\":" + JSONObject.quote(transferId)
+                                    + ",\"transferred\":" + copied + ",\"size\":" + total + "}");
+                }
+            }
+            out.force(false);
+            if (!transferId.isEmpty()) {
+                bridge.emitEvent("android:copyProgress",
+                        "{\"id\":" + JSONObject.quote(transferId)
+                                + ",\"transferred\":" + total + ",\"size\":" + total + "}");
+            }
+        }
     }
 
     /** Remove selected-file cache entries after a send succeeds or fails. */
@@ -893,10 +946,22 @@ public class MainActivity extends AppCompatActivity {
 
         // Copy the documents off the main thread, then notify Go
         new Thread(() -> {
-            for (Uri uri : uris) {
-                String path = copyUriToCache(uri);
-                if (path != null) {
-                    bridge.filePickerResult(callbackID, path);
+            if (!uris.isEmpty()) {
+                ExecutorService pool = Executors.newFixedThreadPool(Math.min(uris.size(), 4));
+                try {
+                    List<Future<String>> futures = new ArrayList<>();
+                    for (Uri uri : uris) {
+                        futures.add(pool.submit(() -> copyUriToCache(uri)));
+                    }
+                    for (Future<String> f : futures) {
+                        try {
+                            String path = f.get();
+                            if (path != null) bridge.filePickerResult(callbackID, path);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                } finally {
+                    pool.shutdown();
                 }
             }
             bridge.filePickerDone(callbackID);
@@ -924,20 +989,20 @@ public class MainActivity extends AppCompatActivity {
             if (!dir.mkdirs()) {
                 return null;
             }
-            File out = new File(dir, name);
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 OutputStream os = new FileOutputStream(out)) {
-                if (in == null) {
-                    deleteRecursively(dir);
-                    return null;
-                }
-                byte[] buf = new byte[FILE_COPY_BUFFER_SIZE];
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    os.write(buf, 0, n);
+            File outFile = new File(dir, name);
+            ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r");
+            if (pfd == null) { deleteRecursively(dir); return null; }
+            try (FileChannel in = new ParcelFileDescriptor.AutoCloseInputStream(pfd).getChannel();
+                 FileChannel out = new FileOutputStream(outFile).getChannel()) {
+                long total = in.size();
+                long copied = 0;
+                while (copied < total) {
+                    long n = in.transferTo(copied, 8L << 20, out);
+                    if (n <= 0) break;
+                    copied += n;
                 }
             }
-            return out.getAbsolutePath();
+            return outFile.getAbsolutePath();
         } catch (Exception e) {
             deleteRecursively(dir);
             Log.e(TAG, "Failed to copy picked document", e);
@@ -1223,6 +1288,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         releaseDiscoveryMulticastLock();
+        releaseTransferWifiLock();
         super.onDestroy();
         unregisterSystemEventReceivers();
         if (bridge != null) {
