@@ -33,15 +33,28 @@ import * as $models from "./models.js";
  * address in the device table so the existing HTTP/QUIC path can use it. It
  * falls back to returning ErrWifiDirectUnsupported when the platform cannot host
  * a link, leaving normal LAN discovery untouched.
+ * 
+ * peerName is the display name reported by discovery; it seeds the injected
+ * device so it renders meaningfully before any beacon refreshes it.
  */
-export function ConnectWifiDirect(peerID: string): $CancellablePromise<string> {
-    return $Call.ByID(433749557, peerID);
+export function ConnectWifiDirect(peerID: string, peerName: string): $CancellablePromise<string> {
+    return $Call.ByID(433749557, peerID, peerName);
 }
 
 export function Diagnostics(): $CancellablePromise<$models.Diagnostics> {
     return $Call.ByID(4146114391).then(($result: any) => {
         return $$createType0($result);
     });
+}
+
+/**
+ * DisconnectWifiDirect tears down the active P2P group (if one exists) and
+ * forgets the peer that was injected via ConnectWifiDirect, emitting
+ * device-lost so the UI drops it. Leaving the group formed would keep the
+ * peer's Wi-Fi radio in P2P mode, so this is the user's way back to LAN mode.
+ */
+export function DisconnectWifiDirect(peerID: string): $CancellablePromise<void> {
+    return $Call.ByID(1101464407, peerID);
 }
 
 export function GetDevicePairingCode(): $CancellablePromise<string> {

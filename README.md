@@ -65,15 +65,16 @@ go test ./internal/light -run '^$' -bench '^BenchmarkTransferTransport$' -bencht
 ## Experimental Wi-Fi Direct
 
 TCP/QUIC remains the stable default transport. The repository contains
-experimental Wi-Fi Direct platform adapters and backend APIs, and the
-`wifiDirect` setting is persisted as an opt-in toggle (default off). The
-current frontend does not yet expose a peer scan/connect flow for those APIs,
-so normal user transfers continue to use LAN discovery or QR-paired addresses.
+experimental Wi-Fi Direct platform adapters, backend APIs, and a frontend
+scan/connect flow. The `wifiDirect` setting is persisted as an opt-in toggle
+(default off); when enabled, the Send view shows a Wi-Fi Direct panel to scan
+for nearby peers, form a P2P link, and transfer over it.
 
 Wi-Fi Direct is orthogonal to the QUIC/TCP transport choice: it decides *which
 network* the transfer uses, while `transportMode` decides *which protocol* runs
-over it. The native adapters can return a P2P transfer address for the existing
-HTTP/TCP or QUIC stack, but end-to-end UI integration remains unfinished.
+over it. The native adapters return a P2P transfer address that the existing
+HTTP/TCP or QUIC stack uses unchanged. If this device becomes the group owner,
+the app tells you to start the transfer from the other device instead.
 
 Supported platforms (experimental):
 
@@ -194,7 +195,7 @@ Settings are stored in `~/.light/settings.json`:
 | `autoAccept` | false | Accept incoming files without prompting |
 | `theme` | dark | UI theme (dark only for now) |
 | `transportMode` | tcp | `tcp` for the stable path, or `quic` to try HTTP/3 first and fall back to TCP |
-| `wifiDirect` | false | Enables the experimental Wi-Fi Direct backend; the current frontend does not yet expose peer scan/connect controls |
+| `wifiDirect` | false | Enables the experimental Wi-Fi Direct backend and the Send-view peer scan/connect panel |
 
 ## Architecture
 

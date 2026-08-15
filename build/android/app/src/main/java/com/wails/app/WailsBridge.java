@@ -845,7 +845,14 @@ public class WailsBridge {
             IntentFilter filter = new IntentFilter();
             filter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION);
             filter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION);
-            activity.registerReceiver(wifiP2pReceiver, filter);
+            // API 33+ requires an explicit exported flag for system
+            // broadcasts; the P2P actions come from the system Wi-Fi service,
+            // not from this process.
+            if (Build.VERSION.SDK_INT >= 26) {
+                activity.registerReceiver(wifiP2pReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                activity.registerReceiver(wifiP2pReceiver, filter);
+            }
             wifiDirectReady = true;
             // Prime an initial peer query so a fresh Discover() returns quickly.
             wifiP2pManager.requestPeers(wifiP2pChannel, peerListListener);
@@ -891,13 +898,22 @@ public class WailsBridge {
                 }
             };
 
-    /** Report the negotiated group owner address (the peer's transfer endpoint). */
+    /** Report the negotiated group address to Go. When this device became the
+     * group owner, the IP is our own (the peer's is only known once it dials
+     * us); the owner flag lets Go surface that case to the UI instead of
+     * trying to transfer to itself. */
     private final WifiP2pManager.ConnectionInfoListener connectionInfoListener =
             new WifiP2pManager.ConnectionInfoListener() {
                 @Override
                 public void onConnectionInfoAvailable(WifiP2pInfo info) {
-                    if (info != null && info.groupFormed && info.groupOwnerAddress != null) {
-                        nativeWifiDirectConnected(info.groupOwnerAddress.getHostAddress());
+                    if (info == null || !info.groupFormed || info.groupOwnerAddress == null) return;
+                    try {
+                        JSONObject o = new JSONObject();
+                        o.put("ip", info.groupOwnerAddress.getHostAddress());
+                        o.put("owner", info.isGroupOwner);
+                        nativeWifiDirectConnected(o.toString());
+                    } catch (Exception e) {
+                        Log.e(TAG, "connectionInfoListener failed", e);
                     }
                 }
             };
@@ -928,49 +944,68 @@ public class WailsBridge {
         }
     }
 
-    /** Go -> Java: begin peer discovery (WifiP2pManager.discoverPeers). */
+    /**
+     * Go -> Java: begin peer discovery (WifiP2pManager.discoverPeers).
+     * Dispatched onto the main thread because ensureWifiDirectPermission()
+     * may call Activity.requestPermissions, which must run on the UI thread;
+     * JNI entries arrive on an arbitrary worker thread.
+     */
     public void wifiDirectStartDiscovery() {
-        ensureWifiDirectPermission();
-        if (!wifiDirectReady || wifiP2pManager == null || wifiP2pChannel == null) {
-            nativeWifiDirectError("wifi-direct: manager unavailable");
-            return;
-        }
-        wifiP2pManager.discoverPeers(wifiP2pChannel, new WifiP2pManager.ActionListener() {
-            @Override public void onSuccess() { }
-            @Override public void onFailure(int reason) {
-                nativeWifiDirectError("wifi-direct: discover failed (reason " + reason + ")");
+        mainHandler.post(() -> {
+            ensureWifiDirectPermission();
+            if (!wifiDirectReady || wifiP2pManager == null || wifiP2pChannel == null) {
+                nativeWifiDirectError("wifi-direct: manager unavailable");
+                return;
             }
+            wifiP2pManager.discoverPeers(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+                @Override public void onSuccess() { }
+                @Override public void onFailure(int reason) {
+                    nativeWifiDirectError("wifi-direct: discover failed (reason " + reason + ")");
+                }
+            });
         });
     }
 
-    /** Go -> Java: connect to a peer by its device address. */
+    /**
+     * Go -> Java: connect to a peer by its device address. Runs on the main
+     * thread (see wifiDirectStartDiscovery). groupOwnerIntent is set to MIN so
+     * this device is least likely to become the group owner: then the
+     * negotiated groupOwnerAddress is the peer's, which Connect returns to the
+     * transfer stack. When we still end up as owner the connection-info
+     * listener reports owner=true and Go surfaces ErrWifiDirectGroupOwner.
+     */
     public void wifiDirectConnect(final String deviceAddress) {
-        ensureWifiDirectPermission();
-        if (!wifiDirectReady || wifiP2pManager == null || wifiP2pChannel == null) {
-            nativeWifiDirectError("wifi-direct: manager unavailable");
-            return;
-        }
-        final WifiP2pConfig config = new WifiP2pConfig();
-        config.deviceAddress = deviceAddress;
-        config.wps.setup = WpsInfo.PBC;
-        wifiP2pManager.connect(wifiP2pChannel, config, new WifiP2pManager.ActionListener() {
-            @Override public void onSuccess() {
-                // The IP arrives asynchronously via the connection-info listener.
+        mainHandler.post(() -> {
+            ensureWifiDirectPermission();
+            if (!wifiDirectReady || wifiP2pManager == null || wifiP2pChannel == null) {
+                nativeWifiDirectError("wifi-direct: manager unavailable");
+                return;
             }
-            @Override public void onFailure(int reason) {
-                nativeWifiDirectError("wifi-direct: connect failed (reason " + reason + ")");
-            }
+            final WifiP2pConfig config = new WifiP2pConfig();
+            config.deviceAddress = deviceAddress;
+            config.wps.setup = WpsInfo.PBC;
+            config.groupOwnerIntent = WifiP2pConfig.GROUP_OWNER_INTENT_MIN;
+            wifiP2pManager.connect(wifiP2pChannel, config, new WifiP2pManager.ActionListener() {
+                @Override public void onSuccess() {
+                    // The IP arrives asynchronously via the connection-info listener.
+                }
+                @Override public void onFailure(int reason) {
+                    nativeWifiDirectError("wifi-direct: connect failed (reason " + reason + ")");
+                }
+            });
         });
     }
 
     /** Go -> Java: tear down the P2P group (removeGroup). */
     public void wifiDirectCloseGroup() {
-        if (wifiP2pManager == null || wifiP2pChannel == null) return;
-        wifiP2pManager.removeGroup(wifiP2pChannel, new WifiP2pManager.ActionListener() {
-            @Override public void onSuccess() { }
-            @Override public void onFailure(int reason) {
-                Log.w(TAG, "removeGroup failed (reason " + reason + ")");
-            }
+        mainHandler.post(() -> {
+            if (wifiP2pManager == null || wifiP2pChannel == null) return;
+            wifiP2pManager.removeGroup(wifiP2pChannel, new WifiP2pManager.ActionListener() {
+                @Override public void onSuccess() { }
+                @Override public void onFailure(int reason) {
+                    Log.w(TAG, "removeGroup failed (reason " + reason + ")");
+                }
+            });
         });
     }
 

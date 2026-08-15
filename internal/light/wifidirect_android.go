@@ -51,10 +51,18 @@ type androidWifiDirectManager struct {
 	peers    []WifiDirectPeer
 	peerByID map[string]WifiDirectPeer
 
-	// connIP is the group owner address delivered by the host once the link is
-	// up; connErr flags a failed handshake. Both are read by Connect.
-	connIP  string
-	connErr error
+	// connIP is the group address delivered by the host once the link is up;
+	// connOwner records whether THIS device became the group owner (in which
+	// case connIP is our own address and the peer's is unknown until it dials
+	// us); connErr flags a failed handshake. All three are read by Connect.
+	connIP    string
+	connOwner bool
+	connErr   error
+
+	// lastErr records the most recent error reported via nativeWifiDirectError
+	// so Discover can surface "manager unavailable" instead of returning an
+	// empty list silently.
+	lastErr string
 
 	// discoverCh / connectCh are re-created per operation (buffered, cap 1) so a
 	// Java callback can wake exactly the goroutine that is waiting.
@@ -84,6 +92,7 @@ func (m *androidWifiDirectManager) Discover(ctx context.Context) ([]WifiDirectPe
 	m.mu.Lock()
 	ch := make(chan struct{}, 1)
 	m.discoverCh = ch
+	m.lastErr = ""
 	m.mu.Unlock()
 
 	// Trigger WifiP2pManager.discoverPeers() on the host. Peer updates arrive
@@ -100,6 +109,9 @@ func (m *androidWifiDirectManager) Discover(ctx context.Context) ([]WifiDirectPe
 	defer m.mu.Unlock()
 	out := make([]WifiDirectPeer, len(m.peers))
 	copy(out, m.peers)
+	if len(out) == 0 && m.lastErr != "" {
+		return nil, fmt.Errorf("wifi-direct: %s", m.lastErr)
+	}
 	return out, nil
 }
 
@@ -112,7 +124,9 @@ func (m *androidWifiDirectManager) Connect(ctx context.Context, peerID string) (
 	ch := make(chan struct{}, 1)
 	m.connectCh = ch
 	m.connIP = ""
+	m.connOwner = false
 	m.connErr = nil
+	m.lastErr = ""
 	m.mu.Unlock()
 
 	// Ask the host to connect to the peer. peerID is the WifiP2pDevice
@@ -124,10 +138,18 @@ func (m *androidWifiDirectManager) Connect(ctx context.Context, peerID string) (
 	case <-ch:
 		m.mu.Lock()
 		ip := m.connIP
+		owner := m.connOwner
 		err := m.connErr
 		m.mu.Unlock()
 		if err != nil || ip == "" {
 			return "", ErrWifiDirectUnsupported
+		}
+		// When we became the group owner, ip is our own group address; the
+		// peer's transfer endpoint is only known once it dials us. Normal LAN
+		// beacons still flow across the fresh link, so the peer shows up in
+		// the regular device list.
+		if owner {
+			return "", ErrWifiDirectGroupOwner
 		}
 		return fmt.Sprintf("%s:%d", ip, wifiDirectTransferPort), nil
 	case <-ctx.Done():
@@ -186,15 +208,25 @@ func wdNotifyPeers(jsonStr string) {
 	}
 }
 
-// wdNotifyConnected records the negotiated group owner address and wakes
-// Connect.
-func wdNotifyConnected(ip string) {
+// wdNotifyConnected records the negotiated group address and wakes Connect.
+// jsonStr is {"ip":"...","owner":true|false}; owner is true when THIS device
+// became the group owner, in which case the IP is our own group address.
+func wdNotifyConnected(jsonStr string) {
 	m := wdManager
 	if m == nil {
 		return
 	}
+	var info struct {
+		IP    string `json:"ip"`
+		Owner bool   `json:"owner"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &info); err != nil {
+		return
+	}
+
 	m.mu.Lock()
-	m.connIP = ip
+	m.connIP = info.IP
+	m.connOwner = info.Owner
 	ch := m.connectCh
 	m.mu.Unlock()
 
@@ -207,7 +239,9 @@ func wdNotifyConnected(ip string) {
 }
 
 // wdNotifyError flags a failed handshake so a waiting Connect returns
-// ErrWifiDirectUnsupported instead of blocking until ctx expiry.
+// ErrWifiDirectUnsupported instead of blocking until ctx expiry. It also wakes
+// a waiting Discover so the failure (e.g. missing permission) surfaces through
+// Discover's lastErr path instead of timing out silently.
 func wdNotifyError(msg string) {
 	m := wdManager
 	if m == nil {
@@ -215,13 +249,17 @@ func wdNotifyError(msg string) {
 	}
 	m.mu.Lock()
 	m.connErr = ErrWifiDirectUnsupported
-	ch := m.connectCh
+	m.lastErr = msg
+	connectCh := m.connectCh
+	discoverCh := m.discoverCh
 	m.mu.Unlock()
 
-	if ch != nil {
-		select {
-		case ch <- struct{}{}:
-		default:
+	for _, ch := range []chan struct{}{connectCh, discoverCh} {
+		if ch != nil {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
