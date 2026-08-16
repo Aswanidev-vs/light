@@ -3,6 +3,7 @@ package light
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,4 +215,45 @@ func resumeControl(ctrl *sendControl) {
 	ctrl.resumeCh = make(chan struct{})
 	ctrl.mu.Unlock()
 	close(old)
+}
+
+// TestRateTrackerReportsCurrentNotLifetimeAverage pins the speed regression: the
+// reporter must track the bytes moved in the RECENT window, not total/elapsed.
+// After a fast window following a slow start the smoothed rate must EXCEED the
+// lifetime average (which can only ever fall), proving the new behaviour.
+func TestRateTrackerReportsCurrentNotLifetimeAverage(t *testing.T) {
+	started := time.Now()
+	rt := rateTracker{started: started}
+
+	// Window 1: 100 bytes over 1s => 100 B/s, primes the tracker.
+	r1 := rt.sample(started.Add(1*time.Second), 100)
+	if r1 != 100 {
+		t.Fatalf("primed rate = %d, want 100", r1)
+	}
+
+	// Window 2: another 100 bytes in just 0.5s => instant 200 B/s.
+	r2 := rt.sample(started.Add(1500*time.Millisecond), 200)
+	elapsed := 1.5                               // runtime value: keeps the division out of constant folding
+	lifetimeAvg := int64(float64(200) / elapsed) // ~133 B/s, the old formula's answer
+	if r2 <= lifetimeAvg {
+		t.Fatalf("current rate %d should exceed lifetime average %d after a burst", r2, lifetimeAvg)
+	}
+}
+
+// TestCancellationReaderAbortsWhenFlagged verifies the inbound reader stops the
+// copy within one chunk of the cancel predicate flipping.
+func TestCancellationReaderAbortsWhenFlagged(t *testing.T) {
+	flag := false
+	cr := &cancellationReader{
+		r:         bytes.NewReader(bytes.Repeat([]byte("z"), 64)),
+		cancelled: func() bool { return flag },
+	}
+	buf := make([]byte, 8)
+	if n, err := cr.Read(buf); n != 8 || err != nil {
+		t.Fatalf("read before cancel = %d/%v, want 8/nil", n, err)
+	}
+	flag = true
+	if n, err := cr.Read(buf); n != 0 || !errors.Is(err, errTransferCancelled) {
+		t.Fatalf("read after cancel = %d/%v, want 0/errTransferCancelled", n, err)
+	}
 }

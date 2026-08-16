@@ -96,8 +96,8 @@ func newQUICCertificate() (tls.Certificate, error) {
 func newQUICClient() (*http.Client, func(), error) {
 	// Bind the HTTP/3 client to a single UDP socket with an enlarged kernel
 	// buffer. The default UDP receive buffer (~212 KiB on Linux/Android) drops
-	// bursts and throttles QUIC at Wi-Fi speed; transferSocketControl raises it.
-	udpConn, err := (&net.ListenConfig{Control: transferSocketControl}).ListenPacket(context.Background(), "udp", "0.0.0.0:0")
+	// bursts and throttles QUIC at Wi-Fi speed; quicSocketControl raises it.
+	udpConn, err := (&net.ListenConfig{Control: quicSocketControl}).ListenPacket(context.Background(), "udp", "0.0.0.0:0")
 	if err != nil {
 		return nil, nil, err
 	}

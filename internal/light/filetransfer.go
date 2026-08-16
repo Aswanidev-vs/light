@@ -41,11 +41,88 @@ var transferBufferPool = sync.Pool{
 	New: func() any { return make([]byte, chunkSize) },
 }
 
+// rateTracker derives the CURRENT transfer rate from samples taken at each
+// progress emit. A lifetime average (total/elapsed) is what made the reported
+// speed look like it "kept dropping" mid-transfer; this instead measures the
+// bytes moved since the previous emit (typically one progressInterval window)
+// and smooths it with the prior rate so one slow window doesn't whipsaw the UI.
+//
+// sample is mutex-guarded because a segmented upload shares one tracker across
+// its concurrent segment streams.
+type rateTracker struct {
+	mu       sync.Mutex
+	started  time.Time
+	prevRead int64
+	prevTime time.Time
+	rate     int64
+	primed   bool
+}
+
+// sample registers the cumulative byte count at now and returns the smoothed
+// current rate in bytes/second.
+func (rt *rateTracker) sample(now time.Time, read int64) int64 {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !rt.primed {
+		rt.primed = true
+		rt.prevRead, rt.prevTime = read, now
+		if elapsed := now.Sub(rt.started).Seconds(); elapsed > 0 {
+			rt.rate = int64(float64(read) / elapsed)
+		}
+		return rt.rate
+	}
+	if dt := now.Sub(rt.prevTime).Seconds(); dt > 0 {
+		inst := int64(float64(read-rt.prevRead) / dt)
+		if inst < 0 {
+			inst = 0
+		}
+		rt.rate = (rt.rate + inst) / 2
+	}
+	rt.prevRead, rt.prevTime = read, now
+	return rt.rate
+}
+
+// errTransferCancelled aborts an inbound copy when the receiving user cancels
+// the transfer; the handler turns it into a clean cancelled finalization.
+var errTransferCancelled = errors.New("transfer cancelled")
+
+// errReceiverCancelled is what an upload returns when the peer answered with a
+// cancellation instead of accepting the data.
+var errReceiverCancelled = errors.New("receiver cancelled")
+
+// cancellationReader aborts an inbound body read once the receiver-side cancel
+// flag is set. Checked once per chunk (1 MiB), so a cancelled inbound transfer
+// stops streaming within ~1 chunk of the click.
+type cancellationReader struct {
+	r         io.Reader
+	cancelled func() bool
+}
+
+func (c *cancellationReader) Read(p []byte) (int, error) {
+	if c.cancelled() {
+		return 0, errTransferCancelled
+	}
+	return c.r.Read(p)
+}
+
 type acceptState struct {
 	status     string // pending | accepted | rejected | cancelled
 	senderID   string
 	senderAddr string
 	senderType DeviceType
+	// files lists the filenames from the prepare payload so a receive-side
+	// cancel can finalize every row of the batch, not just the clicked one.
+	files []string
+	// cancelled is set by CancelTransfer on the receiving device; inbound
+	// readers observe it and abort mid-stream. Atomic so hot-path reads need
+	// no lock.
+	cancelled atomic.Bool
+}
+
+// isCancelled returns a lock-free predicate the inbound readers poll once per
+// chunk.
+func (st *acceptState) isCancelled() bool {
+	return st != nil && st.cancelled.Load()
 }
 
 // ctrlStatus* mirror TransferStatus for lock-free reads on the upload hot path.
@@ -83,8 +160,10 @@ type assemblyState struct {
 	segmentDigests  []string
 	declaredDigests []string
 	failed          bool
+	canceled        bool
 	started         time.Time
 	lastEmit        time.Time // guarded by mu
+	rate            rateTracker
 }
 
 // receiveCounter wraps the inbound request body on the receiver so a segmented
@@ -119,11 +198,7 @@ func (as *assemblyState) reportProgress(subID, fname string, emitFn func(string,
 	as.lastEmit = now
 	as.mu.Unlock()
 	transferred := atomic.LoadInt64(&as.receivedBytes)
-	elapsed := now.Sub(as.started).Seconds()
-	speed := int64(0)
-	if elapsed > 0 {
-		speed = int64(float64(transferred) / elapsed)
-	}
+	speed := as.rate.sample(now, transferred)
 	manager.UpdateProgress(subID, transferred, speed)
 	if emitFn != nil {
 		emitFn("transfer-progress", map[string]any{
@@ -228,7 +303,7 @@ func (s *FileTransferService) StartServer() error {
 	if normalizeTransportMode(s.settings.GetSettings().TransportMode) == "quic" {
 		quicServer, err = newQUICServer(fmt.Sprintf(":%d", port), mux)
 		if err == nil {
-			quicConn, err = (&net.ListenConfig{Control: transferSocketControl}).ListenPacket(context.Background(), "udp", fmt.Sprintf(":%d", port))
+			quicConn, err = (&net.ListenConfig{Control: quicSocketControl}).ListenPacket(context.Background(), "udp", fmt.Sprintf(":%d", port))
 		}
 		if err != nil {
 			// Keep the stable TCP listener alive when UDP/QUIC is unavailable.
@@ -315,7 +390,11 @@ func (s *FileTransferService) handlePrepare(w http.ResponseWriter, r *http.Reque
 	s.mu.Lock()
 	st, ok := s.accepts[p.TransferID]
 	if !ok {
-		st = &acceptState{status: "pending"}
+		names := make([]string, 0, len(p.Files))
+		for _, f := range p.Files {
+			names = append(names, f.Name)
+		}
+		st = &acceptState{status: "pending", files: names}
 		s.accepts[p.TransferID] = st
 	}
 	st.senderID = p.SenderID
@@ -454,11 +533,23 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		app:      s.app,
 		manager:  s.manager,
 	}
+	receiver.rate = rateTracker{started: receiver.started}
 	buffer := transferBufferPool.Get().([]byte)
 	defer transferBufferPool.Put(buffer)
-	written, err := io.CopyBuffer(receiver, r.Body, buffer)
+	// The body is wrapped so a receiver-side cancel aborts the copy within one
+	// chunk; the partial file is removed by the deferred cleanup above.
+	body := &cancellationReader{r: r.Body, cancelled: st.isCancelled}
+	written, err := io.CopyBuffer(receiver, body, buffer)
 	receiver.reportProgress(true)
 	if err != nil {
+		if errors.Is(err, errTransferCancelled) {
+			// The deferred cleanup removes the partial file; mark the row
+			// cancelled and answer 499 so the sender stops instead of retrying.
+			s.manager.Cancel(subID)
+			s.emit(map[string]string{"id": subID}, "transfer-cancelled")
+			http.Error(w, "cancelled", 499)
+			return
+		}
 		s.failTransfer(subID, fname, err.Error())
 		http.Error(w, "read/write error", 400)
 		return
@@ -710,6 +801,27 @@ func (s *FileTransferService) waitAccept(peerAddr, tid string, client *http.Clie
 	return false
 }
 
+// peerCancelProbe asks the peer whether the transfer was cancelled on the
+// receive side. A "cancelled" status answer means the peer stopped accepting
+// data voluntarily, so the upload should surface a cancellation rather than a
+// generic network failure. Any probe failure (old peer, network down) reports
+// false and leaves the error classification to the caller.
+func (s *FileTransferService) peerCancelProbe(client *http.Client, scheme, peerAddr, tid string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+peerAddr+"/api/status/"+tid, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode == 200 && strings.TrimSpace(string(b)) == "cancelled"
+}
+
 func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname string, size int64, _ string, client *http.Client, scheme string) error {
 	subID := tid + ":" + fname
 	ctx, cancel := context.WithCancel(context.Background())
@@ -907,6 +1019,7 @@ func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Clie
 		size:     size,
 		started:  started,
 		lastEmit: time.Now(),
+		rate:     rateTracker{started: started},
 		app:      s.app,
 		manager:  s.manager,
 		total:    totalSent,
@@ -934,10 +1047,17 @@ func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Clie
 
 	resp, err := client.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
 			s.manager.Cancel(subID)
 			s.emit(map[string]string{"id": subID}, "transfer-cancelled")
-		} else {
+		case s.peerCancelProbe(client, scheme, peerAddr, tid):
+			// The peer stopped accepting (it cancelled the receive); report as
+			// cancelled rather than a generic failure.
+			s.manager.Cancel(subID)
+			s.emit(map[string]string{"id": subID}, "transfer-cancelled")
+			err = errReceiverCancelled
+		default:
 			s.failTransfer(subID, fname, err.Error())
 		}
 		return "", err
@@ -945,6 +1065,13 @@ func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Clie
 	respBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
+		// A cancellation answering 499 (new receivers) or surfacing as another
+		// status (older ones mid-read) both resolve through the status probe.
+		if resp.StatusCode == 499 || s.peerCancelProbe(client, scheme, peerAddr, tid) {
+			s.manager.Cancel(subID)
+			s.emit(map[string]string{"id": subID}, "transfer-cancelled")
+			return "", errReceiverCancelled
+		}
 		errMsg := fmt.Sprintf("receiver error %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		s.failTransfer(subID, fname, errMsg)
 		return "", errors.New(errMsg)
@@ -1000,12 +1127,17 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 		http.Error(w, "cannot create destination dir: "+err.Error(), 500)
 		return
 	}
+	s.mu.Lock()
+	st := s.accepts[tid]
+	s.mu.Unlock()
 	key := tid + "\x00" + fname
+	now := time.Now()
 	val, _ := s.assemblies.LoadOrStore(key, &assemblyState{
 		totalSize:       size,
 		segmentCount:    int(segCount),
 		finalPath:       uniquePath(filepath.Join(dl, sanitize(fname))),
-		started:         time.Now(),
+		started:         now,
+		rate:            rateTracker{started: now},
 		segmentDigests:  make([]string, segCount),
 		declaredDigests: make([]string, segCount),
 	})
@@ -1015,17 +1147,23 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 		return
 	}
 	as.mu.Lock()
-	alreadyFailed := as.failed
-	if alreadyFailed {
-		// A sibling segment already failed this assembly. Count the arrival so
-		// the last sibling can remove the state; do not touch the partial file.
+	alreadyDone := as.failed || as.canceled
+	if alreadyDone {
+		// A sibling already failed or cancelled this assembly. Count the
+		// arrival so the last sibling can remove the state; don't touch the
+		// partial file.
 		as.received++
 		last := as.received == as.segmentCount
+		wasCanceled := as.canceled
 		as.mu.Unlock()
 		if last {
 			s.assemblies.Delete(key)
 		}
-		http.Error(w, "transfer failed", 400)
+		if wasCanceled {
+			http.Error(w, "cancelled", 499)
+		} else {
+			http.Error(w, "transfer failed", 400)
+		}
 		return
 	}
 	as.mu.Unlock()
@@ -1056,12 +1194,17 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 	buffer := transferBufferPool.Get().([]byte)
 	defer transferBufferPool.Put(buffer)
 	emitFn := func(name string, p any) { s.emit(p, name) }
-	rc := &receiveCounter{r: r.Body, as: as, subID: subID, fname: fname, emitFn: emitFn, manager: s.manager}
+	rc := &receiveCounter{r: &cancellationReader{r: r.Body, cancelled: st.isCancelled}, as: as, subID: subID, fname: fname, emitFn: emitFn, manager: s.manager}
 	// Hash the segment in-stream alongside the write so verification adds no
 	// extra disk pass.
 	segHash := sha256.New()
 	if _, err := io.CopyBuffer(io.MultiWriter(f, segHash), rc, buffer); err != nil {
 		_ = f.Close()
+		if errors.Is(err, errTransferCancelled) {
+			s.cancelSegment(as, key, partialPath, subID)
+			http.Error(w, "cancelled", 499)
+			return
+		}
 		s.failSegment(as, key, partialPath, subID, fname, err.Error())
 		http.Error(w, "read/write error", 400)
 		return
@@ -1175,6 +1318,37 @@ func (s *FileTransferService) failSegment(as *assemblyState, key, partialPath, s
 	s.failTransfer(subID, fname, msg)
 }
 
+// cancelSegment is the cancellation twin of failSegment: it marks the assembly
+// canceled, stops counting it toward completion, and — once every in-flight
+// sibling has reported in — removes the state and the partial file, then
+// surfaces a cancelled (not failed) transfer to the UI.
+func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath, subID string) {
+	as.mu.Lock()
+	if as.canceled {
+		// A sibling already initiated the cancel; just count ourselves.
+		as.received++
+		last := as.received == as.segmentCount
+		as.mu.Unlock()
+		if last {
+			s.assemblies.Delete(key)
+			_ = os.Remove(partialPath)
+		}
+		return
+	}
+	as.canceled = true
+	as.received++
+	last := as.received == as.segmentCount
+	as.mu.Unlock()
+	// The first canceling segment removes the partial file immediately so a
+	// partial artifact never lingers; later siblings see canceled and skip.
+	_ = os.Remove(partialPath)
+	if last {
+		s.assemblies.Delete(key)
+	}
+	s.manager.Cancel(subID)
+	s.emit(map[string]string{"id": subID}, "transfer-cancelled")
+}
+
 // ---- Pause / resume / cancel ----
 
 func (s *FileTransferService) PauseTransfer(id string) {
@@ -1238,9 +1412,46 @@ func (s *FileTransferService) CancelTransfer(id string) {
 		if release != nil {
 			close(release)
 		}
+		s.manager.Cancel(id)
+		s.emit(map[string]string{"id": id}, "transfer-cancelled")
+		return
 	}
-	s.manager.Cancel(id)
-	s.emit(map[string]string{"id": id}, "transfer-cancelled")
+	// No sendControl for this id: it is an INBOUND transfer on this device.
+	// Flag the acceptState so the inbound readers abort within one chunk, and
+	// cancel every file row of the batch immediately so the UI does not wait
+	// for each stream to notice.
+	s.cancelInbound(id)
+}
+
+// cancelInbound cancels a transfer this device is RECEIVING. id is a subID
+// (tid:filename); the whole batch is cancelled. The inbound handlers observe
+// the acceptState flag mid-stream, remove the partial file, and finalize the
+// row as cancelled; this function also surfaces the cancellation right away so
+// the receiving UI stops showing "Receiving" without waiting for the network
+// round-trip to fail each stream.
+func (s *FileTransferService) cancelInbound(id string) {
+	tid := id
+	if i := strings.Index(id, ":"); i > 0 {
+		tid = id[:i]
+	}
+	s.mu.Lock()
+	st := s.accepts[tid]
+	var files []string
+	if st != nil {
+		st.cancelled.Store(true)
+		st.status = "cancelled"
+		files = append([]string{}, st.files...)
+	}
+	s.mu.Unlock()
+	for _, fname := range files {
+		subID := tid + ":" + fname
+		s.manager.Cancel(subID)
+		s.emit(map[string]string{"id": subID}, "transfer-cancelled")
+	}
+	if len(files) == 0 && id != "" {
+		s.manager.Cancel(id)
+		s.emit(map[string]string{"id": id}, "transfer-cancelled")
+	}
 }
 
 // ---- Accept / reject (receiver side) ----
@@ -1303,6 +1514,7 @@ type countingReader struct {
 	lastEmit time.Time
 	sent     int64
 	total    *int64 // optional shared total across parallel segments
+	rate     rateTracker
 	app      *application.App
 	manager  *TransferManager
 }
@@ -1341,11 +1553,7 @@ func (c *countingReader) reportProgress(force bool) {
 	if c.total != nil {
 		transferred = atomic.LoadInt64(c.total)
 	}
-	elapsed := now.Sub(c.started).Seconds()
-	speed := int64(0)
-	if elapsed > 0 {
-		speed = int64(float64(transferred) / elapsed)
-	}
+	speed := c.rate.sample(now, transferred)
 	c.manager.UpdateProgress(c.subID, transferred, speed)
 	if c.app != nil {
 		c.app.Event.Emit("transfer-progress", map[string]any{
@@ -1363,6 +1571,7 @@ type receivingWriter struct {
 	written  int64
 	started  time.Time
 	lastEmit time.Time
+	rate     rateTracker
 	app      *application.App
 	manager  *TransferManager
 }
@@ -1382,11 +1591,7 @@ func (w *receivingWriter) reportProgress(force bool) {
 		return
 	}
 	w.lastEmit = now
-	elapsed := now.Sub(w.started).Seconds()
-	speed := int64(0)
-	if elapsed > 0 {
-		speed = int64(float64(w.written) / elapsed)
-	}
+	speed := w.rate.sample(now, w.written)
 	transferred := w.offset + w.written
 	w.manager.UpdateProgress(w.subID, transferred, speed)
 	if w.app != nil {
