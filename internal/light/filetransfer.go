@@ -1610,8 +1610,31 @@ func atoi64(s string) int64 {
 }
 
 func sanitize(name string) string {
+	// Normalize separators first so Base can reliably collapse path components
+	// across platforms and mixed input.
+	name = strings.ReplaceAll(name, "\\", "/")
 	name = filepath.Base(name)
-	return strings.ReplaceAll(name, "/", "_")
+	if name == "." || name == ".." || name == "" {
+		return "unnamed"
+	}
+
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if out == "" || out == "." || out == ".." {
+		return "unnamed"
+	}
+	return out
 }
 
 func uniquePath(path string) string {
