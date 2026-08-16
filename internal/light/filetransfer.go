@@ -1323,6 +1323,30 @@ func (s *FileTransferService) failSegment(as *assemblyState, key, partialPath, s
 // sibling has reported in — removes the state and the partial file, then
 // surfaces a cancelled (not failed) transfer to the UI.
 func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath, subID string) {
+	safeRemovePartial := func() {
+		dl, err := s.receiveDir()
+		if err != nil {
+			return
+		}
+		baseAbs, err := filepath.Abs(dl)
+		if err != nil {
+			return
+		}
+		targetAbs, err := filepath.Abs(partialPath)
+		if err != nil {
+			return
+		}
+		base := filepath.Clean(baseAbs)
+		target := filepath.Clean(targetAbs)
+		baseWithSep := base
+		if !strings.HasSuffix(baseWithSep, string(os.PathSeparator)) {
+			baseWithSep += string(os.PathSeparator)
+		}
+		if target == base || strings.HasPrefix(target, baseWithSep) {
+			_ = os.Remove(target)
+		}
+	}
+
 	as.mu.Lock()
 	if as.canceled {
 		// A sibling already initiated the cancel; just count ourselves.
@@ -1331,7 +1355,7 @@ func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath,
 		as.mu.Unlock()
 		if last {
 			s.assemblies.Delete(key)
-			_ = os.Remove(partialPath)
+			safeRemovePartial()
 		}
 		return
 	}
@@ -1341,7 +1365,7 @@ func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath,
 	as.mu.Unlock()
 	// The first canceling segment removes the partial file immediately so a
 	// partial artifact never lingers; later siblings see canceled and skip.
-	_ = os.Remove(partialPath)
+	safeRemovePartial()
 	if last {
 		s.assemblies.Delete(key)
 	}
