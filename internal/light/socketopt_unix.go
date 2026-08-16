@@ -7,27 +7,40 @@ import (
 	"syscall"
 )
 
-// listenSocketBufferSize is the receive/send buffer requested for transfer
-// sockets. Fast Wi-Fi has a large bandwidth-delay product; the OS default
-// (~64 KiB) can throttle throughput. Accepted TCP sockets inherit the listener
-// buffer sizes, while the TCP dialer applies the same setting to its own
-// sockets.
-const listenSocketBufferSize = 8 << 20 // 8 MiB
+// tcpSocketBufferSize bounds the kernel buffers of transfer TCP sockets. This
+// is deliberately small: the sender counts bytes as soon as the OS accepts
+// them into the socket buffer, while the receiver only counts them after the
+// disk write — every byte buffered in the kernel inflates the reported gap
+// between the two devices (an 8 MiB send buffer times several parallel
+// streams produced ~30 MB of apparent over-transfer on fast Wi-Fi). Wi-Fi
+// RTT is single-digit milliseconds, so 1 MiB still covers the
+// bandwidth-delay product at hundreds of MB/s.
+const tcpSocketBufferSize = 1 << 20 // 1 MiB
+
+// udpSocketBufferSize is kept large for QUIC only: dropped UDP datagrams
+// throttle the whole QUIC connection, so its receive buffer stays generous.
+const udpSocketBufferSize = 8 << 20 // 8 MiB
 
 func transferSocketControl(network, address string, c syscall.RawConn) error {
 	return c.Control(func(fd uintptr) {
 		// Best effort: Unix kernels may clamp these values to system limits.
 		// TCP_NODELAY is a no-op (ignored) on the QUIC/UDP socket.
-		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, listenSocketBufferSize)
-		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, listenSocketBufferSize)
+		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, tcpSocketBufferSize)
+		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, tcpSocketBufferSize)
 		_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
 	})
 }
 
-// socketListenConfig returns a net.ListenConfig that requests a large kernel
-// socket buffer on created sockets. Best-effort: if the OS clamps the value
-// (e.g. Linux net.core.rmem_max without CAP_NET_ADMIN), transfers still work,
-// just at the smaller buffer.
+func quicSocketControl(network, address string, c syscall.RawConn) error {
+	return c.Control(func(fd uintptr) {
+		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, udpSocketBufferSize)
+		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, udpSocketBufferSize)
+	})
+}
+
+// socketListenConfig returns a net.ListenConfig that requests the (bounded)
+// kernel socket buffer on created sockets. Best-effort: if the OS clamps the
+// value, transfers still work, just at the smaller buffer.
 func socketListenConfig() net.ListenConfig {
 	return net.ListenConfig{
 		Control: transferSocketControl,

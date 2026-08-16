@@ -502,3 +502,151 @@ func TestCleanupPartialFilesRemovesOnlyStaleArtifacts(t *testing.T) {
 		}
 	}
 }
+
+// TestCancelInboundTransferAbortsMidStream pins the "cancel on the receiving
+// phone" bug: cancelling an inbound transfer must abort the copy, leave no
+// partial artifact, and mark the row cancelled (not failed/completed).
+func TestCancelInboundTransferAbortsMidStream(t *testing.T) {
+	downloadDir := t.TempDir()
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DownloadDir: downloadDir, AutoAccept: true}}
+	service := NewFileTransferService(nil, manager, settings, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", service.handlePrepare)
+	mux.HandleFunc("/api/transfer", service.handleTransfer)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	tid := "cancel-inbound"
+	fname := "slow.bin"
+	const size = 1 << 20 // 1 MiB so the copy takes several chunks
+
+	prepareBody, _ := json.Marshal(PreparePayload{
+		TransferID: tid,
+		Files:      []FileManifestEntry{{Name: fname, Size: size}},
+	})
+	resp, err := http.Post(server.URL+"/api/prepare", "application/json", bytes.NewReader(prepareBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// A slow body: the server reads in 1 MiB chunks while we cancel mid-way.
+	body := &slowBody{remaining: size, perChunk: 8 << 10, delay: time.Millisecond}
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/transfer", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Transfer-Id", tid)
+	req.Header.Set("X-Filename", fname)
+	req.Header.Set("X-File-Size", strconv.FormatInt(size, 10))
+
+	// Cancel once a few chunks have been delivered.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		service.CancelTransfer(tid + ":" + fname)
+	}()
+
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 499 {
+		t.Fatalf("cancelled transfer status = %d (%s), want 499", resp.StatusCode, strings.TrimSpace(string(body2)))
+	}
+
+	// History row must be cancelled, and no partial file may linger.
+	history := manager.GetHistory(1)
+	if len(history) == 0 || history[0].Status != StatusCancelled {
+		t.Fatalf("history = %#v, want a cancelled transfer", history)
+	}
+	entries, err := os.ReadDir(downloadDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("download dir after cancel contains artifacts: %#v", entries)
+	}
+}
+
+// slowBody feeds the transfer endpoint a little data at a time so a cancel can
+// land mid-stream in tests without huge payloads.
+type slowBody struct {
+	remaining int64
+	perChunk  int64
+	delay     time.Duration
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if b.delay > 0 {
+		time.Sleep(b.delay)
+	}
+	n := b.perChunk
+	if n > int64(len(p)) {
+		n = int64(len(p))
+	}
+	if n > b.remaining {
+		n = b.remaining
+	}
+	for i := int64(0); i < n; i++ {
+		p[i] = 'x'
+	}
+	b.remaining -= n
+	return int(n), nil
+}
+
+func (b *slowBody) Close() error { return nil }
+
+// TestSendFilesSurfacesReceiverCancelAsCancelled verifies the sender side: when
+// the peer reports "cancelled" on /api/status, the upload finalizes as
+// cancelled (not a generic network failure) so the sender UI matches the phone.
+func TestSendFilesSurfacesReceiverCancelAsCancelled(t *testing.T) {
+	manager := &TransferManager{active: make(map[string]*Transfer)}
+	settings := &SettingsService{cfg: Settings{DeviceName: "cancel sender", Port: 9120}, id: "cancel-sender-id"}
+	service := NewFileTransferService(nil, manager, settings, nil)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("accepted"))
+	})
+	// Reject the body and answer cancellation on the status probe.
+	mux.HandleFunc("/api/transfer", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "cancelled", 499)
+	})
+	mux.HandleFunc("/api/status/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("cancelled"))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	path := filepath.Join(t.TempDir(), "cancel-me.bin")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := service.SendFiles(TransferRequest{DeviceAddr: server.Listener.Addr().String(), FilePaths: []string{path}})
+	if err != nil {
+		// SendFiles aggregates per-file errors; the individual row is what
+		// matters — it must be cancelled, not failed.
+		if strings.Contains(err.Error(), "checksum") || strings.Contains(err.Error(), "receiver error") {
+			t.Fatalf("SendFiles error = %v, want a clean cancellation", err)
+		}
+	}
+	// The row keyed "<tid>:cancel-me.bin" must be cancelled in history.
+	for _, trow := range manager.GetHistory(10) {
+		if strings.HasSuffix(trow.ID, ":cancel-me.bin") {
+			if trow.Status != StatusCancelled {
+				t.Fatalf("cancelled upload row status = %q, want %q", trow.Status, StatusCancelled)
+			}
+			return
+		}
+	}
+	t.Fatalf("no history row found for cancelled upload; history = %#v", manager.GetHistory(10))
+}
