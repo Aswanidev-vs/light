@@ -1285,6 +1285,30 @@ func (s *FileTransferService) failSegment(as *assemblyState, key, partialPath, s
 // sibling has reported in — removes the state and the partial file, then
 // surfaces a cancelled (not failed) transfer to the UI.
 func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath, subID string) {
+	safeRemovePartial := func() {
+		dl, err := s.receiveDir()
+		if err != nil {
+			return
+		}
+		baseAbs, err := filepath.Abs(dl)
+		if err != nil {
+			return
+		}
+		targetAbs, err := filepath.Abs(partialPath)
+		if err != nil {
+			return
+		}
+		base := filepath.Clean(baseAbs)
+		target := filepath.Clean(targetAbs)
+		baseWithSep := base
+		if !strings.HasSuffix(baseWithSep, string(os.PathSeparator)) {
+			baseWithSep += string(os.PathSeparator)
+		}
+		if target == base || strings.HasPrefix(target, baseWithSep) {
+			_ = os.Remove(target)
+		}
+	}
+
 	as.mu.Lock()
 	if as.canceled {
 		// A sibling already initiated the cancel; just count ourselves.
@@ -1293,7 +1317,7 @@ func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath,
 		as.mu.Unlock()
 		if last {
 			s.assemblies.Delete(key)
-			_ = os.Remove(partialPath)
+			safeRemovePartial()
 		}
 		return
 	}
@@ -1303,7 +1327,7 @@ func (s *FileTransferService) cancelSegment(as *assemblyState, key, partialPath,
 	as.mu.Unlock()
 	// The first canceling segment removes the partial file immediately so a
 	// partial artifact never lingers; later siblings see canceled and skip.
-	_ = os.Remove(partialPath)
+	safeRemovePartial()
 	if last {
 		s.assemblies.Delete(key)
 	}
@@ -1572,8 +1596,31 @@ func atoi64(s string) int64 {
 }
 
 func sanitize(name string) string {
+	// Normalize separators first so Base can reliably collapse path components
+	// across platforms and mixed input.
+	name = strings.ReplaceAll(name, "\\", "/")
 	name = filepath.Base(name)
-	return strings.ReplaceAll(name, "/", "_")
+	if name == "." || name == ".." || name == "" {
+		return "unnamed"
+	}
+
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if out == "" || out == "." || out == ".." {
+		return "unnamed"
+	}
+	return out
 }
 
 func uniquePath(path string) string {
