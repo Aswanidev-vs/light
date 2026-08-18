@@ -117,7 +117,10 @@ func (s *SettingsService) load() {
 		s.cfg.Theme = "dark"
 	}
 	if s.cfg.TransportMode == "" {
-		s.cfg.TransportMode = "tcp"
+		// QUIC (HTTP/3) is the default: multiple streams multiplex over one
+		// connection and the client probes + falls back to TCP automatically
+		// when the peer does not support it, so interop is safe.
+		s.cfg.TransportMode = "quic"
 	} else {
 		s.cfg.TransportMode = normalizeTransportMode(s.cfg.TransportMode)
 	}
