@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Light identity (sparse) package manifest.
+  This is NOT a full MSIX — it only grants package identity (and therefore the
+  `proximity` device capability) to the unpackaged light.exe so Wi-Fi Direct
+  works on Windows. It is registered against the app's install directory via
+  Register-LightIdentity.ps1 (run by the Inno Setup installer, or manually).
+
+  The `msix` element in build/windows/wails.exe.manifest must use the same
+  publisher / packageName / applicationId values below, or the linkage fails.
+-->
+<Package IgnorableNamespaces="uap uap10 rescap"
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+  <Identity Name="Light" Publisher="CN=Light" Version="0.1.0.0" ProcessorArchitecture="neutral" />
+  <Properties>
+    <DisplayName>Light</DisplayName>
+    <PublisherDisplayName>Light</PublisherDisplayName>
+    <Logo>Assets\storelogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Capabilities>
+    <!-- Required for any Win32 app granted package identity. -->
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+    <!-- Wi-Fi Direct (Windows.Devices.WiFiDirect) requires the proximity device
+         capability; without it DeviceInformation.FindAllAsync and
+         WiFiDirectDevice.FromIdAsync are access-denied. This is the ONLY
+         feature capability granted — keep it minimal. -->
+    <uap:Capability Name="proximity" />
+  </Capabilities>
+  <Applications>
+    <Application Id="Light" Executable="light.exe" uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements AppListEntry="none" DisplayName="Light" Description="Light file sharing"
+        BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+</Package>

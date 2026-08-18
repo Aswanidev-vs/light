@@ -62,28 +62,55 @@ To compare the local transport paths:
 go test ./internal/light -run '^$' -bench '^BenchmarkTransferTransport$' -benchtime=1s
 ```
 
-## Experimental Wi-Fi Direct
+## Experimental Wi-Fi Direct (peer-to-peer)
 
-TCP/QUIC remains the stable default transport. The repository contains
-experimental Wi-Fi Direct platform adapters, backend APIs, and a frontend
-scan/connect flow. The `wifiDirect` setting is persisted as an opt-in toggle
-(default off); when enabled, the Send view shows a Wi-Fi Direct panel to scan
-for nearby peers, form a P2P link, and transfer over it.
+Light can transfer files over a direct Wi-Fi Direct (P2P) link instead of an
+access point, so two devices can share even when they are not on the same
+Wi-Fi network. TCP/QUIC remains the stable default transport; Wi-Fi Direct only
+changes *which network* the transfer uses, while `transportMode` still decides
+*which protocol* (HTTP/TCP or QUIC) runs over it. The native adapters negotiate
+the P2P link and return the peer's transfer address; the existing transfer stack
+then rides on top unchanged.
 
-Wi-Fi Direct is orthogonal to the QUIC/TCP transport choice: it decides *which
-network* the transfer uses, while `transportMode` decides *which protocol* runs
-over it. The native adapters return a P2P transfer address that the existing
-HTTP/TCP or QUIC stack uses unchanged. If this device becomes the group owner,
-the app tells you to start the transfer from the other device instead.
+The feature is opt-in: the `wifiDirect` setting (default off) enables the Send
+view's Wi-Fi Direct panel, which scans for nearby peers, forms a group, and
+transfers over the link.
 
-Supported platforms (experimental):
+**Bidirectional by design.** Once the P2P group is up, the normal LAN UDP
+discovery beacons (port 9129) flow across the link, so each side appears in the
+other's device list and can initiate a transfer either way. If this device ends
+up as the *group owner*, its negotiated address is its own; the app surfaces
+`ErrWifiDirectGroupOwner` and tells you to start the transfer from the other
+device (the peer shows up in the regular list via the beacons).
 
-- **Android** and **Windows** have experimental backend support. Android uses
-  `WifiP2pManager`; Windows uses the WinRT `WiFiDirectDevice` API, which
-  requires the app's `Proximity` capability.
-- **Linux** uses `wpa_supplicant` P2P when available.
+**Supported platforms:**
+
+- **Android** — fully implemented via the Java `WifiP2pManager` (JNI bridge in
+  `wifidirect_android.go` / `wifidirect_android_bridge.go`). Requests
+  `NEARBY_WIFI_DEVICES` on Android 13+ or location on older releases.
+- **Windows** — implemented via the WinRT `WiFiDirectDevice` API
+  (`wifidirect_windows.go`). Wi-Fi Direct needs the `proximity` device
+  capability, which an unpackaged `.exe` does not get by default. The Inno
+  Setup installer ships and registers a small **identity (sparse) package**
+  (`build/windows/sparse/`) that grants `proximity` to `light.exe`. This
+  registers automatically when **Windows Developer Mode** is enabled (free, no
+  code-signing certificate needed) or when the package is signed with a trusted
+  cert. If neither is in place, Wi-Fi Direct stays unavailable and the app
+  silently falls back to the LAN path.
+- **Linux** — implemented via `wpa_supplicant` (`wpa_cli`, `p2p_connect` with
+  push-button auth) when the tooling is present.
 - **macOS is NOT supported** — Apple only exposes MultipeerConnectivity, which
-  cannot host the app's HTTP transfer server — so the toggle is hidden there.
+  cannot host the app's HTTP transfer server, so the toggle is hidden there.
+
+**Status.** The platform backends, the JNI/WinRT bridge, and the Send-view flow
+are implemented and the Go code builds, vets, and passes the Wi-Fi Direct unit
+tests on Windows. End-to-end transfer on real hardware has not yet been
+validated in CI; treat the feature as experimental until confirmed on a real
+laptop + phone pair. On Windows, the `proximity` grant comes from the identity
+package in `build/windows/sparse/`; without a signing certificate it registers
+only under Developer Mode, so Windows Wi-Fi Direct is currently a
+developer/enthusiast path — ordinary users should transfer over the LAN (same
+Wi-Fi) instead.
 
 ## Tech Stack
 
@@ -195,7 +222,7 @@ Settings are stored in `~/.light/settings.json`:
 | `autoAccept` | false | Accept incoming files without prompting |
 | `theme` | dark | UI theme (dark only for now) |
 | `transportMode` | tcp | `tcp` for the stable path, or `quic` to try HTTP/3 first and fall back to TCP |
-| `wifiDirect` | false | Enables the experimental Wi-Fi Direct backend and the Send-view peer scan/connect panel |
+| `wifiDirect` | false | Enables the experimental Wi-Fi Direct (peer-to-peer) backend and the Send-view peer scan/connect panel |
 
 ## Architecture
 

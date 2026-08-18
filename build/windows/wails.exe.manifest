@@ -19,4 +19,12 @@
             </requestedPrivileges>
         </security>
     </trustInfo>
+    <!-- Links this unpackaged exe to the identity (sparse) package in
+         build/windows/sparse/AppxManifest.xml so it gains the `proximity`
+         capability for Wi-Fi Direct. Values MUST match that manifest's
+         Identity (Name) + Publisher and the Application Id. -->
+    <msix xmlns="urn:schemas-microsoft-com:msix.v1"
+          publisher="CN=Light"
+          packageName="Light"
+          applicationId="Light" />
 </assembly>

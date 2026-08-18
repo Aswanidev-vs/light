@@ -15,7 +15,15 @@ const connectedId = ref<string | null>(null)
 // until it dials us, so the UI explains to start the transfer from the other
 // device. The peer appears in the regular device list once the link is up.
 const ownerNotice = ref(false)
+const ownerId = ref<string | null>(null)
 const supported = ref(false)
+
+// The Go backend surfaces two sentinel errors we want to present with
+// friendly, user-facing copy instead of the raw error string.
+function isUnsupported(msg: string): boolean {
+  const m = msg.toLowerCase()
+  return m.includes('not supported') || m.includes('unsupported')
+}
 // True once at least one scan has finished, so the panel can distinguish
 // "no scan yet" from "scanned and found nothing".
 const hasScanned = ref(false)
@@ -44,7 +52,12 @@ export function useWifiDirect() {
       peers.value = found || []
     } catch (e: any) {
       peers.value = []
-      toast(e?.message || 'Wi-Fi Direct scan failed', 'error')
+      const msg: string = e?.message || String(e)
+      if (isUnsupported(msg)) {
+        toast("Wi-Fi Direct isn't available on this device / link", 'error')
+      } else {
+        toast(msg || 'Wi-Fi Direct scan failed', 'error')
+      }
     } finally {
       scanning.value = false
       hasScanned.value = true
@@ -73,12 +86,16 @@ export function useWifiDirect() {
       toast('Wi-Fi Direct link is up', 'success')
     } catch (e: any) {
       const msg: string = e?.message || String(e)
-      if (msg.includes('group owner')) {
+      if (msg.toLowerCase().includes('group owner')) {
         // Link formed, but as group owner our peer's address is only known
         // once it connects to us. The usual LAN beacons flow across the fresh
-        // link, so the peer shows up in the device list shortly.
+        // link, so the peer shows up in the device list shortly. Keep the
+        // group alive and offer a disconnect so it can still be torn down.
+        ownerId.value = peer.id
         ownerNotice.value = true
         refresh().catch(() => {})
+      } else if (isUnsupported(msg)) {
+        toast("Wi-Fi Direct isn't available on this device / link", 'error')
       } else {
         toast(msg || 'Wi-Fi Direct connection failed', 'error')
       }
@@ -88,7 +105,7 @@ export function useWifiDirect() {
   }
 
   async function disconnect(peerId?: string) {
-    const id = peerId || connectedId.value
+    const id = peerId || connectedId.value || ownerId.value
     if (!id) return
     try {
       await DiscoveryService.DisconnectWifiDirect(id)
@@ -96,7 +113,11 @@ export function useWifiDirect() {
       // best-effort teardown
     }
     if (connectedId.value === id) connectedId.value = null
+    if (ownerId.value === id) {
+      ownerId.value = null
+      ownerNotice.value = false
+    }
   }
 
-  return { peers, scanning, connectingId, connectedId, ownerNotice, hasScanned, supported, init, scan, connect, disconnect }
+  return { peers, scanning, connectingId, connectedId, ownerNotice, ownerId, hasScanned, supported, init, scan, connect, disconnect }
 }

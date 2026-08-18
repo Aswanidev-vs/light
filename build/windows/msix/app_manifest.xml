@@ -50,6 +50,10 @@
   
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
-    
+    <!-- Wi-Fi Direct (Windows.Devices.WiFiDirect) requires the proximity
+         device capability, otherwise DeviceInformation.FindAllAsync and
+         WiFiDirectDevice.FromIdAsync are access-denied. -->
+    <uap:Capability Name="proximity" />
+    <uap:Capability Name="internetClient" />
   </Capabilities>
 </Package>

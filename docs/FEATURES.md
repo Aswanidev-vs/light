@@ -134,6 +134,21 @@ not expose it.
 - The managers discover peers, form a P2P group, return the negotiated transfer
   address, and tear the group down. The existing HTTP/TCP or optional QUIC
   transfer stack is reused after a link is established.
+- **Windows backend corrected.** The WinRT COM vtable for
+  `IDeviceInformationStatics` previously had its method slots in the wrong
+  order, so `Discover()` invoked the wrong method and returned no peers; the
+  order now matches the documented ABI. The capability is actually conferred to
+  the unpackaged `.exe` by the **identity (sparse) package** in
+  `build/windows/sparse/` (manifest + `Register-LightIdentity.ps1`), wired into
+  the Inno Setup installer. It registers automatically under **Windows Developer
+  Mode** with no certificate, or for any user when the package is signed with a
+  trusted cert. The MSIX `app_manifest.xml`/`template.xml` also declare
+  `proximity` + `internetClient` for the packaged-build case.
+- **Bidirectional by design.** After the group forms, the normal LAN UDP
+  discovery beacons (port 9129) cross the P2P link, so each side shows up in the
+  other's device list and can start a transfer either way. The peer is also
+  seeded directly from the connect result, so a transfer works even before the
+  first beacon arrives.
 - Android uses a JNI bridge between Go and the Java host, requests
   `NEARBY_WIFI_DEVICES` on Android 13+ or location permission on older releases,
   and listens for peer and connection-info broadcasts. P2P system receivers are
@@ -147,7 +162,14 @@ not expose it.
 - The `wifiDirect` setting toggles a full end-to-end flow: the Send view shows a
   Wi-Fi Direct panel that scans via `WifiDirectPeers`, connects via
   `ConnectWifiDirect(peerID, peerName)`, injects the peer into the device list
-  (persisted past beacon expiry), and tears the group down on disconnect.
+  (persisted past beacon expiry), and tears the group down on disconnect. The
+  panel surfaces `ErrWifiDirectUnsupported` as a toast and adds a disconnect
+  control in the group-owner case.
+- **Status.** The backends, the JNI/WinRT bridge, and the Send-view flow are
+  implemented; the Go code builds, vets, and passes the Wi-Fi Direct unit tests
+  on Windows. End-to-end transfer on real hardware is not yet validated in CI —
+  treat the feature as experimental until confirmed on a real laptop + phone
+  pair.
 
 ## Android native/runtime implementation
 

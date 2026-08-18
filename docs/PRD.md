@@ -57,6 +57,15 @@ Light is a high-speed, cross-platform file sharing application built with Wails3
 - Device name customization
 - Theme preference (dark/light)
 
+### 4.6 Wi-Fi Direct (peer-to-peer, experimental)
+
+For transfers when the two devices are not on the same Wi-Fi access point,
+Light can form a direct Wi-Fi Direct (P2P) group and transfer over it. This is
+an alternative *network path*; the chosen transport (TCP/QUIC) and all
+transfer/checksum logic are unchanged. It is opt-in (the `wifiDirect` setting)
+and currently supported on Android, Windows, and Linux; macOS is excluded
+because it only exposes MultipeerConnectivity.
+
 ## 5. Non-Functional Requirements
 
 ### 5.1 Performance
