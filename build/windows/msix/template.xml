@@ -21,7 +21,10 @@
         PackageDescription="A light application">
         <Capabilities>
             <Capability Name="runFullTrust" />
-            
+            <!-- Wi-Fi Direct (Windows.Devices.WiFiDirect) needs the proximity
+                 device capability; internetClient is commonly required too. -->
+            <Capability Name="proximity" />
+            <Capability Name="internetClient" />
         </Capabilities>
         <Applications>
             <Application

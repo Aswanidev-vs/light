@@ -48,6 +48,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\..\bin\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; Identity (sparse) package that grants light.exe the `proximity` capability
+; for Wi-Fi Direct. Registration is attempted post-install (see [Run]).
+Source: "sparse\*"; DestDir: "{app}\sparse"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -56,6 +59,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Best-effort: grant the `proximity` capability for Wi-Fi Direct. Succeeds under
+; Windows Developer Mode (no cert) or with a signed package; never blocks install.
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\sparse\Register-LightIdentity.ps1"" -InstallDir ""{app}"""; Flags: runhidden; Description: "Registering Wi-Fi Direct capability (proximity)"
 
 [Code]
 // Check if WebView2 is installed
@@ -75,3 +81,7 @@ begin
     // WebView2 installation could be added here if needed
   end;
 end;
+
+[UninstallRun]
+; Remove the identity package so Wi-Fi Direct capability is cleaned up.
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\sparse\Register-LightIdentity.ps1"" -Unregister"; Flags: runhidden

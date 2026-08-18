@@ -413,7 +413,17 @@ func (d *DiscoveryService) ensureSenders() []*net.UDPConn {
 					continue
 				}
 				if !isUsableLANIPv4(ipnet.IP) {
-					continue
+					// A Wi-Fi Direct virtual adapter frequently only gets an
+					// APIPA (169.254.x.x) address on the P2P link. We still want
+					// our beacon to cross that link for bidirectional discovery,
+					// so add a directed-broadcast sender for link-local
+					// interfaces as well. We deliberately do NOT relax the
+					// link-local drop in handleBeacon nor change isUsableLANIPv4,
+					// because the P2P peer is seeded by ConnectWifiDirect and the
+					// connection-info path works without beacon rediscovery.
+					if !ipnet.IP.IsLinkLocalUnicast() {
+						continue
+					}
 				}
 				if bcast := directedBroadcast(ipnet); bcast != nil {
 					add(bcast)

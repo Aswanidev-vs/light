@@ -23,6 +23,9 @@ package light
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
 	"net"
 	"sync"
 	"syscall"
@@ -39,6 +42,24 @@ const wifidirectTransferPort = "9120"
 // roInitMultiThreaded mirrors RO_INIT_MULTITHREADED (1) for ole.RoInitialize.
 // Wi-Fi Direct operations are asynchronous, so we run in the MTA.
 const roInitMultiThreaded = 1
+
+// winrtErr wraps a WinRT failure as a WifiDirect error while staying compatible
+// with errors.Is(..., ErrWifiDirectUnsupported), so callers still fall back to
+// ordinary LAN discovery. The text carries the failing operation and HRESULT
+// for on-device debugging, and the same detail is logged cheaply.
+func winrtErr(op string, hr uintptr) error {
+	log.Printf("[wifidirect] %s failed (hr=0x%x)", op, hr)
+	return fmt.Errorf("wifi-direct: %s failed (hr=0x%x): %w", op, hr, ErrWifiDirectUnsupported)
+}
+
+// winrtErrCause is like winrtErr but wraps an existing error cause.
+func winrtErrCause(op string, cause error) error {
+	if cause == nil {
+		cause = errors.New("unknown failure")
+	}
+	log.Printf("[wifidirect] %s failed: %v", op, cause)
+	return fmt.Errorf("wifi-direct: %s failed: %w: %w", op, ErrWifiDirectUnsupported, cause)
+}
 
 // WinRT contract interface IIDs (see header note).
 var (
@@ -71,12 +92,19 @@ func newPlatformWifiDirectManager() (WifiDirectManager, error) {
 func (m *windowsWifiDirectManager) Discover(ctx context.Context) ([]WifiDirectPeer, error) {
 	selector, err := wfdDeviceSelector()
 	if err != nil {
-		return nil, ErrWifiDirectUnsupported
+		return nil, winrtErrCause("GetDeviceSelector", err)
 	}
+	// We own selector (a fresh HSTRING); the callee copies it, so free it once
+	// FindAllAsyncAqsFilter returns.
+	defer ole.DeleteHString(selector)
 
 	di, err := ole.RoGetActivationFactory("Windows.Devices.Enumeration.DeviceInformation", iidIDeviceInformationStatics)
 	if err != nil {
-		return nil, ErrWifiDirectUnsupported
+		return nil, winrtErrCause("RoGetActivationFactory(DeviceInformation)", err)
+	}
+	defer releaseInspectable(di)
+	if di.RawVTable == nil {
+		return nil, winrtErr("DeviceInformation.RawVTable", 0)
 	}
 	diVT := (*iDeviceInformationStaticsVtbl)(unsafe.Pointer(di.RawVTable))
 
@@ -87,14 +115,22 @@ func (m *windowsWifiDirectManager) Discover(ctx context.Context) ([]WifiDirectPe
 		uintptr(selector),
 		uintptr(unsafe.Pointer(&async)))
 	if r != 0 || async == nil {
-		return nil, ErrWifiDirectUnsupported
+		return nil, winrtErr("FindAllAsyncAqsFilter", r)
 	}
+	defer releaseInspectable(async)
 
 	coll, err := awaitAsyncOp(ctx, async)
 	if err != nil {
-		return nil, ErrWifiDirectUnsupported
+		return nil, err
 	}
-	return enumerateDevices(coll)
+	defer releaseInspectable(coll)
+
+	peers, err := enumerateDevices(coll)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[wifidirect] Discover found %d peer(s)", len(peers))
+	return peers, nil
 }
 
 // Connect forms a P2P group with peerID and returns its transfer address as
@@ -103,13 +139,17 @@ func (m *windowsWifiDirectManager) Discover(ctx context.Context) ([]WifiDirectPe
 func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (string, error) {
 	wfd, err := ole.RoGetActivationFactory("Windows.Devices.WiFiDirect.WiFiDirectDevice", iidIWiFiDirectDeviceStatics)
 	if err != nil {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErrCause("RoGetActivationFactory(WiFiDirectDevice)", err)
+	}
+	defer releaseInspectable(wfd)
+	if wfd.RawVTable == nil {
+		return "", winrtErr("WiFiDirectDevice.RawVTable", 0)
 	}
 	wfdVT := (*iWiFiDirectDeviceStaticsVtbl)(unsafe.Pointer(wfd.RawVTable))
 
 	hid, err := ole.NewHString(peerID)
 	if err != nil {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErrCause("NewHString(peerID)", err)
 	}
 	defer ole.DeleteHString(hid)
 
@@ -120,12 +160,13 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 		uintptr(hid),
 		uintptr(unsafe.Pointer(&async)))
 	if r != 0 || async == nil {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("FromIdAsync", r)
 	}
+	defer releaseInspectable(async)
 
 	device, err := awaitAsyncOp(ctx, async)
 	if err != nil {
-		return "", ErrWifiDirectUnsupported
+		return "", err
 	}
 
 	// Hold the device so Close() can dispose it; drop any previous one first.
@@ -136,6 +177,9 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 	m.device = device
 	m.mu.Unlock()
 
+	if device.RawVTable == nil {
+		return "", winrtErr("WiFiDirectDevice result RawVTable", 0)
+	}
 	devVT := (*iWiFiDirectDeviceVtbl)(unsafe.Pointer(device.RawVTable))
 
 	// IWiFiDirectDevice::get_ConnectionEndpointPairs(IVectorView<EndpointPair>**)
@@ -144,14 +188,15 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 		uintptr(unsafe.Pointer(device)),
 		uintptr(unsafe.Pointer(&pairs)))
 	if r != 0 || pairs == nil {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("GetConnectionEndpointPairs", r)
 	}
+	defer releaseInspectable(pairs)
 
 	pairsVT := (*iVectorViewVtbl)(unsafe.Pointer(pairs.RawVTable))
 	var cnt uint32
 	syscall.SyscallN(pairsVT.GetSize, 2, uintptr(unsafe.Pointer(pairs)), uintptr(unsafe.Pointer(&cnt)), 0)
 	if cnt == 0 {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("GetConnectionEndpointPairs/empty", 0)
 	}
 
 	// IVectorView<EndpointPair>::GetAt(uint32, EndpointPair**)
@@ -161,8 +206,9 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 		0,
 		uintptr(unsafe.Pointer(&ep)))
 	if r != 0 || ep == nil {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("EndpointPair.GetAt", r)
 	}
+	defer releaseInspectable(ep)
 
 	epVT := (*iEndpointPairVtbl)(unsafe.Pointer(ep.RawVTable))
 	// IEndpointPair::get_RemoteHostName(HostName**)
@@ -171,8 +217,9 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 		uintptr(unsafe.Pointer(ep)),
 		uintptr(unsafe.Pointer(&hostName)))
 	if r != 0 || hostName == nil {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("GetRemoteHostName", r)
 	}
+	defer releaseInspectable(hostName)
 
 	hostVT := (*iHostNameVtbl)(unsafe.Pointer(hostName.RawVTable))
 	// IHostName::get_DisplayName(HSTRING*)
@@ -181,13 +228,16 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 		uintptr(unsafe.Pointer(hostName)),
 		uintptr(unsafe.Pointer(&nameH)))
 	if r != 0 {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("GetDisplayName", r)
 	}
+	defer ole.DeleteHString(nameH)
 	ip := nameH.String()
 	if ip == "" {
-		return "", ErrWifiDirectUnsupported
+		return "", winrtErr("GetDisplayName/empty", 0)
 	}
-	return net.JoinHostPort(ip, wifidirectTransferPort), nil
+	addr := net.JoinHostPort(ip, wifidirectTransferPort)
+	log.Printf("[wifidirect] Connect established link, peer transfer address=%s", addr)
+	return addr, nil
 }
 
 // Close disposes the held WiFiDirectDevice, if any.
@@ -207,7 +257,11 @@ func (m *windowsWifiDirectManager) Close() error {
 func wfdDeviceSelector() (ole.HString, error) {
 	wfd, err := ole.RoGetActivationFactory("Windows.Devices.WiFiDirect.WiFiDirectDevice", iidIWiFiDirectDeviceStatics)
 	if err != nil {
-		return 0, err
+		return 0, winrtErrCause("RoGetActivationFactory(WiFiDirectDevice)", err)
+	}
+	defer releaseInspectable(wfd)
+	if wfd.RawVTable == nil {
+		return 0, winrtErr("WiFiDirectDevice.RawVTable", 0)
 	}
 	wfdVT := (*iWiFiDirectDeviceStaticsVtbl)(unsafe.Pointer(wfd.RawVTable))
 
@@ -217,7 +271,7 @@ func wfdDeviceSelector() (ole.HString, error) {
 		uintptr(unsafe.Pointer(wfd)),
 		uintptr(unsafe.Pointer(&selector)))
 	if r != 0 {
-		return 0, ole.NewError(r)
+		return 0, winrtErr("GetDeviceSelector", r)
 	}
 	return selector, nil
 }
@@ -225,11 +279,14 @@ func wfdDeviceSelector() (ole.HString, error) {
 // enumerateDevices walks an IVectorView<DeviceInformation> and returns each
 // item's Id and Name as a WifiDirectPeer.
 func enumerateDevices(coll *ole.IInspectable) ([]WifiDirectPeer, error) {
+	if coll == nil || coll.RawVTable == nil {
+		return nil, winrtErr("enumerateDevices(coll nil)", 0)
+	}
 	collVT := (*iVectorViewVtbl)(unsafe.Pointer(coll.RawVTable))
 	var size uint32
 	r, _, _ := syscall.SyscallN(collVT.GetSize, 2, uintptr(unsafe.Pointer(coll)), uintptr(unsafe.Pointer(&size)), 0)
 	if r != 0 {
-		return nil, ErrWifiDirectUnsupported
+		return nil, winrtErr("DeviceCollection.GetSize", r)
 	}
 
 	peers := make([]WifiDirectPeer, 0, size)
@@ -246,9 +303,21 @@ func enumerateDevices(coll *ole.IInspectable) ([]WifiDirectPeer, error) {
 		devVT := (*iDeviceInformationVtbl)(unsafe.Pointer(dev.RawVTable))
 
 		var idH, nameH ole.HString
+		// GetId/GetName allocate HSTRINGs we own; free them immediately after
+		// reading so each peer's COM object + HSTRINGs don't pile up across a
+		// large enumeration (and are released even on a partial/error path).
 		syscall.SyscallN(devVT.GetId, 2, uintptr(unsafe.Pointer(dev)), uintptr(unsafe.Pointer(&idH)), 0)
 		syscall.SyscallN(devVT.GetName, 2, uintptr(unsafe.Pointer(dev)), uintptr(unsafe.Pointer(&nameH)), 0)
-		peers = append(peers, WifiDirectPeer{ID: idH.String(), Name: nameH.String()})
+		id := idH.String()
+		name := nameH.String()
+		if idH != 0 {
+			ole.DeleteHString(idH)
+		}
+		if nameH != 0 {
+			ole.DeleteHString(nameH)
+		}
+		releaseInspectable(dev)
+		peers = append(peers, WifiDirectPeer{ID: id, Name: name})
 	}
 	return peers, nil
 }
@@ -258,10 +327,15 @@ func enumerateDevices(coll *ole.IInspectable) ([]WifiDirectPeer, error) {
 // object. Polling avoids implementing a completion-handler COM object; ctx lets
 // discovery/connect abort early.
 func awaitAsyncOp(ctx context.Context, async *ole.IInspectable) (*ole.IInspectable, error) {
+	if async == nil || async.RawVTable == nil {
+		return nil, winrtErr("await(async nil)", 0)
+	}
 	info, err := queryInterface(async, iidIAsyncInfo)
 	if err != nil {
-		return nil, err
+		return nil, winrtErrCause("QueryInterface(IAsyncInfo)", err)
 	}
+	// Balance the QueryInterface AddRef; info is only used for status polling.
+	defer releaseInspectable(info)
 	infoVT := (*iAsyncInfoVtbl)(unsafe.Pointer(info.RawVTable))
 
 	const (
@@ -275,7 +349,7 @@ func awaitAsyncOp(ctx context.Context, async *ole.IInspectable) (*ole.IInspectab
 			uintptr(unsafe.Pointer(info)),
 			uintptr(unsafe.Pointer(&status)))
 		if r != 0 {
-			return nil, ole.NewError(r)
+			return nil, winrtErr("GetStatus", r)
 		}
 		switch status {
 		case asyncStatusCompleted:
@@ -283,12 +357,15 @@ func awaitAsyncOp(ctx context.Context, async *ole.IInspectable) (*ole.IInspectab
 		case asyncStatusStarted:
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				// Best-effort cancel the in-flight WinRT operation so it does
+				// not keep running after the caller has given up.
+				syscall.SyscallN(infoVT.Cancel, 1, uintptr(unsafe.Pointer(info)), 0, 0)
+				return nil, winrtErrCause("await", ctx.Err())
 			case <-time.After(20 * time.Millisecond):
 			}
 		default:
 			// Canceled (2) or Error (3): the link cannot be established.
-			return nil, ErrWifiDirectUnsupported
+			return nil, winrtErr("asyncStatus", uintptr(status))
 		}
 	}
 
@@ -300,7 +377,7 @@ done:
 		uintptr(unsafe.Pointer(async)),
 		uintptr(unsafe.Pointer(&result)))
 	if r != 0 || result == nil {
-		return nil, ole.NewError(r)
+		return nil, winrtErr("GetResults", r)
 	}
 	return result, nil
 }
@@ -333,15 +410,24 @@ func releaseInspectable(ins *ole.IInspectable) {
 // IInspectable 3) so the first slots align, then lists the interface-specific
 // method slots we call. Slot indices follow the documented WinRT ABI order.
 
+// iDeviceInformationStaticsVtbl follows the REAL WinRT ABI slot order for
+// ABI.WINDOWS.DEVICES.ENUMERATION.IDEVICEINFORMATIONSTATICS. The overload
+// ordering matters: the parameter-less form comes first, then the DeviceClass
+// (enum) overload, then the AQS-filter (string) overload, and the same arity
+// rule applies to the CreateWatcher overloads. The previous ordering swapped
+// AqsFilter/DeviceClass, which made FindAllAsyncAqsFilter (the only method we
+// call) land on FindAllAsyncDeviceClass — passing an HSTRING where an int is
+// expected — yielding an empty peer list. Slot indices below follow Microsoft's
+// published IDL for this interface.
 type iDeviceInformationStaticsVtbl struct {
 	ole.IInspectableVtbl
 	FindAllAsync             uintptr
-	FindAllAsyncAqsFilter    uintptr
 	FindAllAsyncDeviceClass  uintptr
+	FindAllAsyncAqsFilter    uintptr
 	CreateFromIdAsync        uintptr
 	CreateWatcher            uintptr
-	CreateWatcherAqsFilter   uintptr
 	CreateWatcherDeviceClass uintptr
+	CreateWatcherAqsFilter   uintptr
 }
 
 type iWiFiDirectDeviceStaticsVtbl struct {

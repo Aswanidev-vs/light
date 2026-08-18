@@ -12,6 +12,7 @@ const {
   connectingId,
   connectedId,
   ownerNotice,
+  ownerId,
   hasScanned,
   supported,
   init,
@@ -42,13 +43,13 @@ onMounted(() => init())
     </div>
 
     <p v-if="ownerNotice" class="mb-2 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
-      Link is up, but this device is the group owner. Start the transfer from the other device — it will appear nearby in a moment.
+      You became the group owner — start the transfer from the other device. The peer will appear in the normal device list via LAN beacons.
     </p>
 
-    <div v-if="connectedId" class="mb-2 flex items-center justify-between rounded-md border border-ok/25 bg-ok/10 px-3 py-2">
+    <div v-if="connectedId || ownerId" class="mb-2 flex items-center justify-between rounded-md border border-ok/25 bg-ok/10 px-3 py-2">
       <div class="flex min-w-0 items-center gap-2 text-xs">
         <StatusDot status="online" />
-        <span class="truncate text-ok">Connected to peer</span>
+        <span class="truncate text-ok">{{ connectedId ? 'Connected to peer' : 'Group formed — you are the group owner' }}</span>
       </div>
       <button class="btn-ghost shrink-0 px-2 py-1 text-xs" @click="disconnect()">Disconnect</button>
     </div>

@@ -153,6 +153,7 @@ func wdCloseGroup() {
 //export Java_com_wails_app_WailsBridge_nativeWifiDirectInit
 func Java_com_wails_app_WailsBridge_nativeWifiDirectInit(env *C.JNIEnv, thiz C.jobject) {
 	C.wdStoreBridge(env, thiz)
+	C.wdClearException(env)
 }
 
 //export Java_com_wails_app_WailsBridge_nativeWifiDirectReportPeers
@@ -164,6 +165,7 @@ func Java_com_wails_app_WailsBridge_nativeWifiDirectReportPeers(env *C.JNIEnv, t
 	s := C.GoString(c)
 	C.wdReleaseJString(env, jjson, c)
 	wdNotifyPeers(s)
+	C.wdClearException(env)
 }
 
 //export Java_com_wails_app_WailsBridge_nativeWifiDirectConnected
@@ -175,6 +177,7 @@ func Java_com_wails_app_WailsBridge_nativeWifiDirectConnected(env *C.JNIEnv, thi
 	s := C.GoString(c)
 	C.wdReleaseJString(env, jip, c)
 	wdNotifyConnected(s)
+	C.wdClearException(env)
 }
 
 //export Java_com_wails_app_WailsBridge_nativeWifiDirectError
@@ -188,4 +191,5 @@ func Java_com_wails_app_WailsBridge_nativeWifiDirectError(env *C.JNIEnv, thiz C.
 	// The message is logged on the Java side; here we only flag the failure so a
 	// waiting Connect returns ErrWifiDirectUnsupported promptly.
 	wdNotifyError(s)
+	C.wdClearException(env)
 }
