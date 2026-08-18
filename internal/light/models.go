@@ -87,8 +87,11 @@ type Settings struct {
 	AutoAccept       bool   `json:"autoAccept"`
 	Theme            string `json:"theme"`
 	EnableEncryption bool   `json:"enableEncryption"`
-	// TransportMode controls outgoing transport selection. TCP is the stable
-	// default; QUIC probes HTTP/3 first and falls back to TCP before uploading.
+	// TransportMode controls outgoing transport selection. QUIC (HTTP/3) is the
+	// default and preferred transport: the client probes the peer over HTTP/3
+	// and falls back to TCP automatically before uploading if UDP/QUIC is
+	// unavailable or the peer does not support it. Set to "tcp" to force plain
+	// TCP for outgoing transfers.
 	TransportMode string `json:"transportMode"`
 	// WifiDirect, when enabled, attempts to form a Wi-Fi Direct (P2P) group with
 	// a peer so transfers run over a private link instead of the shared LAN. It is

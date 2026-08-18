@@ -35,6 +35,12 @@ const (
 	// Files at least this large are split into parallel ranges so a single file
 	// can saturate more than one stream/connection.
 	segmentMinSize = 16 << 20 // 16 MiB
+	// A single large file is split into this many parallel ranges, independent
+	// of the file-level upload cap, so one 1 GB file can saturate several
+	// streams on lossy Wi-Fi and higher-latency links. Mobile uses fewer ranges
+	// to bound CPU and disk pressure.
+	maxSegmentsPerFile    = 8
+	mobileSegmentsPerFile = 4
 )
 
 var transferBufferPool = sync.Pool{
@@ -262,11 +268,11 @@ func newTCPClient() *http.Client {
 				KeepAlive: 30 * time.Second,
 				Control:   transferSocketControl,
 			}).DialContext,
-			MaxIdleConns: 16,
-			// A 4-file batch × 4 segments per file can push 16 concurrent
+			MaxIdleConns: 32,
+			// A 4-file batch × 8 segments per file can push 32 concurrent
 			// streams at one peer; a lower per-host cap would queue segments.
-			MaxIdleConnsPerHost: 16,
-			MaxConnsPerHost:     16,
+			MaxIdleConnsPerHost: 32,
+			MaxConnsPerHost:     32,
 			IdleConnTimeout:     90 * time.Second,
 			WriteBufferSize:     1 << 20,
 			ReadBufferSize:      1 << 20,
@@ -796,7 +802,7 @@ func (s *FileTransferService) waitAccept(peerAddr, tid string, client *http.Clie
 				return false
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 	return false
 }
@@ -843,65 +849,49 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 
 	s.manager.RecordTransfer(&Transfer{ID: subID, Filename: fname, Size: size, Status: StatusActive})
 
+	// Hash the file in the background from a second handle so the SHA-256 cost
+	// never delays the first byte on the wire. Segmented uploads no longer
+	// declare per-segment digests, so the digest is only needed for the final
+	// comparison; the receiver verifies the on-disk bytes itself.
+	hashFile, herr := os.Open(filePath)
+	var senderChecksum string
+	var hashErr error
+	hashDone := make(chan struct{})
+	if herr == nil {
+		go func() {
+			defer close(hashDone)
+			defer hashFile.Close()
+			h := sha256.New()
+			if _, e := io.Copy(h, hashFile); e != nil {
+				hashErr = e
+				return
+			}
+			senderChecksum = hex.EncodeToString(h.Sum(nil))
+		}()
+	} else {
+		close(hashDone)
+	}
+
 	// Split large files into parallel ranges so a single file can saturate more
 	// than one stream/connection. Small files stay single-stream.
-	segCount := 1
-	if size >= segmentMinSize {
-		segCount = s.parallelUploadLimit()
-	}
+	segCount := s.segmentCount(size)
 	fileStart := time.Now()
 
 	if segCount <= 1 {
-		// Hash small files in the background from a second handle so the
-		// SHA-256 cost doesn't sit on the network copy hot path.
-		hashFile, herr := os.Open(filePath)
-		var senderChecksum string
-		var hashErr error
-		hashDone := make(chan struct{})
-		if herr == nil {
-			go func() {
-				defer close(hashDone)
-				defer hashFile.Close()
-				h := sha256.New()
-				if _, e := io.Copy(h, hashFile); e != nil {
-					hashErr = e
-					return
-				}
-				senderChecksum = hex.EncodeToString(h.Sum(nil))
-			}()
-		} else {
-			close(hashDone)
-		}
-		rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, 0, size, filePath, subID, ctrl, 0, 1, fileStart, nil, "", "")
+		rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, 0, size, filePath, subID, ctrl, 0, 1, fileStart, nil)
 		if err != nil {
 			return err
 		}
-		return s.verifyAndComplete(subID, fname, size, rc, senderChecksum, hashDone, &hashErr)
+		return s.verifyAndComplete(subID, fname, size, rc, &senderChecksum, hashDone, &hashErr)
 	}
 
-	// Segmented uploads declare per-segment SHA-256 digests so the receiver can
-	// verify each range in-stream and skip the whole-file read-back hash. That
-	// requires one upfront hash read here; it lands before the first byte goes
-	// on the wire and replaces the identical read-back the receiver previously
-	// paid after the network transfer.
-	boundaries := make([]int64, segCount)
 	segSize := size / int64(segCount)
+	boundaries := make([]int64, segCount)
 	for i := range boundaries {
 		boundaries[i] = int64(i+1) * segSize
 		if i == segCount-1 {
 			boundaries[i] = size
 		}
-	}
-	hashFile, herr := os.Open(filePath)
-	if herr != nil {
-		s.failTransfer(subID, fname, herr.Error())
-		return herr
-	}
-	wholeSum, segDigests, herr := hashFileWithSegments(hashFile, boundaries)
-	hashFile.Close()
-	if herr != nil {
-		s.failTransfer(subID, fname, herr.Error())
-		return herr
 	}
 
 	var totalSent int64
@@ -919,7 +909,7 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 		wg.Add(1)
 		go func(i int, start, end int64) {
 			defer wg.Done()
-			rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, start, end-start, filePath, subID, ctrl, i, segCount, fileStart, &totalSent, wholeSum, segDigests[i])
+			rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, start, end-start, filePath, subID, ctrl, i, segCount, fileStart, &totalSent)
 			if err != nil {
 				failuresMu.Lock()
 				failures = append(failures, fmt.Sprintf("segment %d: %v", i, err))
@@ -938,71 +928,35 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 		s.failTransfer(subID, fname, strings.Join(failures, "; "))
 		return fmt.Errorf("%d segment(s) failed: %s", len(failures), strings.Join(failures, "; "))
 	}
-	// The hash already ran synchronously above; hand verifyAndComplete a
-	// pre-closed done channel so it only performs the checksum comparison.
-	var hashErr error
-	hashDone := make(chan struct{})
-	close(hashDone)
-	return s.verifyAndComplete(subID, fname, size, receiverChecksum, wholeSum, hashDone, &hashErr)
+	return s.verifyAndComplete(subID, fname, size, receiverChecksum, &senderChecksum, hashDone, &hashErr)
 }
 
-// hashFileWithSegments hashes a file once and returns the whole-file SHA-256
-// plus one digest per segment boundary. Segment i covers
-// [boundaries[i-1], boundaries[i]) with the first segment starting at 0.
-func hashFileWithSegments(f *os.File, boundaries []int64) (string, []string, error) {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", nil, err
+// segmentCount returns how many parallel ranges a file is split into for
+// upload. Files below the segment threshold stay single-stream; mobile devices
+// use fewer ranges to bound CPU and disk pressure there.
+func (s *FileTransferService) segmentCount(size int64) int {
+	if size < segmentMinSize {
+		return 1
 	}
-	whole := sha256.New()
-	segHashes := make([]hash.Hash, len(boundaries))
-	for i := range segHashes {
-		segHashes[i] = sha256.New()
+	dev := s.deviceType
+	if dev == "" {
+		dev = PlatformDeviceType()
 	}
-	buffer := transferBufferPool.Get().([]byte)
-	defer transferBufferPool.Put(buffer)
-	seg := 0
-	prev := int64(0)
-	for seg < len(boundaries) {
-		remaining := boundaries[seg] - prev
-		if remaining <= 0 {
-			prev = boundaries[seg]
-			seg++
-			continue
-		}
-		chunk := buffer
-		if remaining < int64(len(chunk)) {
-			chunk = chunk[:remaining]
-		}
-		n, err := f.Read(chunk)
-		if n > 0 {
-			whole.Write(chunk[:n])
-			segHashes[seg].Write(chunk[:n])
-			prev += int64(n)
-		}
-		if prev == boundaries[seg] {
-			prev = boundaries[seg]
-			seg++
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", nil, err
-		}
+	count := maxSegmentsPerFile
+	if dev == DeviceTypeMobile {
+		count = mobileSegmentsPerFile
 	}
-	digests := make([]string, len(segHashes))
-	for i, h := range segHashes {
-		digests[i] = hex.EncodeToString(h.Sum(nil))
+	if count < 1 {
+		count = 1
 	}
-	return hex.EncodeToString(whole.Sum(nil)), digests, nil
+	return count
 }
 
 // uploadRange streams one [offset, offset+length) slice of the file as its own
-// HTTP request. For segmented transfers it carries X-Segment-* headers plus the
-// sender's whole-file and per-segment digests so the receiver can verify each
-// range in-stream; the final segment's response carries the receiver's
-// whole-file checksum, which the caller verifies against the sender's.
-func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Client, scheme, peerAddr, tid, fname string, size, offset, length int64, filePath, subID string, ctrl *sendControl, segIndex, segCount int, started time.Time, totalSent *int64, wholeChecksum, segmentDigest string) (string, error) {
+// HTTP request. For segmented transfers it carries X-Segment-* headers; the
+// final segment's response carries the receiver's whole-file checksum, which
+// the caller verifies against the sender's.
+func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Client, scheme, peerAddr, tid, fname string, size, offset, length int64, filePath, subID string, ctrl *sendControl, segIndex, segCount int, started time.Time, totalSent *int64) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		s.failTransfer(subID, fname, err.Error())
@@ -1039,10 +993,6 @@ func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Clie
 	if segCount > 1 {
 		req.Header.Set("X-Segment-Index", strconv.FormatInt(int64(segIndex), 10))
 		req.Header.Set("X-Segment-Count", strconv.FormatInt(int64(segCount), 10))
-		req.Header.Set("X-Checksum-Sha256", wholeChecksum)
-		// Per-segment digest lets the receiver verify this range in-stream and
-		// skip its whole-file read-back hash once every segment has matched.
-		req.Header.Set("X-Segment-Digest", segmentDigest)
 	}
 
 	resp, err := client.Do(req)
@@ -1090,7 +1040,10 @@ func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Clie
 
 // verifyAndComplete waits for the background hash, then checks the receiver's
 // returned checksum against the sender's and marks the transfer complete.
-func (s *FileTransferService) verifyAndComplete(subID, fname string, size int64, receiverChecksum, senderChecksum string, hashDone chan struct{}, hashErr *error) error {
+// senderChecksum is a pointer because the background hash goroutine writes it;
+// reading a captured value at the call site could observe "" when the network
+// copy finishes before the hash does.
+func (s *FileTransferService) verifyAndComplete(subID, fname string, size int64, receiverChecksum string, senderChecksum *string, hashDone chan struct{}, hashErr *error) error {
 	<-hashDone
 	if *hashErr != nil {
 		s.failTransfer(subID, fname, (*hashErr).Error())
@@ -1100,15 +1053,15 @@ func (s *FileTransferService) verifyAndComplete(subID, fname string, size int64,
 		s.failTransfer(subID, fname, "missing receiver checksum")
 		return errors.New("missing receiver checksum")
 	}
-	if !strings.EqualFold(receiverChecksum, senderChecksum) {
-		errMsg := fmt.Sprintf("checksum mismatch: sender %s, receiver %s", senderChecksum, receiverChecksum)
+	if !strings.EqualFold(receiverChecksum, *senderChecksum) {
+		errMsg := fmt.Sprintf("checksum mismatch: sender %s, receiver %s", *senderChecksum, receiverChecksum)
 		s.failTransfer(subID, fname, errMsg)
 		return errors.New(errMsg)
 	}
-	s.manager.Complete(subID, "", senderChecksum)
+	s.manager.Complete(subID, "", *senderChecksum)
 	if s.app != nil {
 		s.app.Event.Emit("transfer-complete", map[string]any{
-			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": senderChecksum,
+			"id": subID, "filename": fname, "size": size, "filePath": "", "checksum": *senderChecksum,
 		})
 	}
 	return nil
@@ -1117,10 +1070,10 @@ func (s *FileTransferService) verifyAndComplete(subID, fname string, size int64,
 // handleSegmentedTransfer reassembles a file sent as parallel ranges. Each range
 // arrives as its own /api/transfer request carrying X-Segment-* headers; all
 // ranges for a (transfer id, filename) write into one partial file at their
-// given offset while the receiver hashes each range in-stream. When every range
-// matches its sender-declared digest the last range to land skips the
-// whole-file read-back hash; otherwise it falls back to hashing the assembled
-// file before the rename.
+// given offset. Ranges carrying a sender-declared digest are hashed in-stream
+// and verified as they land; when every declared digest matches the last range
+// to land skips the whole-file read-back hash. Otherwise the assembled file is
+// hashed once before the rename.
 func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *http.Request, tid, fname string, size, offset, segIndex, segCount int64, checksum, segDigest, senderID, senderAddr string, senderType DeviceType) {
 	dl, err := s.receiveDir()
 	if err != nil {
@@ -1195,10 +1148,16 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 	defer transferBufferPool.Put(buffer)
 	emitFn := func(name string, p any) { s.emit(p, name) }
 	rc := &receiveCounter{r: &cancellationReader{r: r.Body, cancelled: st.isCancelled}, as: as, subID: subID, fname: fname, emitFn: emitFn, manager: s.manager}
-	// Hash the segment in-stream alongside the write so verification adds no
-	// extra disk pass.
-	segHash := sha256.New()
-	if _, err := io.CopyBuffer(io.MultiWriter(f, segHash), rc, buffer); err != nil {
+	// Hash the segment in-stream only when the sender declared a per-segment
+	// digest to compare against. New senders omit it, so the copy is write-only
+	// and the single on-disk hash at finalize covers verification instead.
+	var segHash hash.Hash
+	var digestTarget io.Writer = f
+	if segDigest != "" {
+		segHash = sha256.New()
+		digestTarget = io.MultiWriter(f, segHash)
+	}
+	if _, err := io.CopyBuffer(digestTarget, rc, buffer); err != nil {
 		_ = f.Close()
 		if errors.Is(err, errTransferCancelled) {
 			s.cancelSegment(as, key, partialPath, subID)
@@ -1211,7 +1170,10 @@ func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *
 	}
 	as.reportProgress(subID, fname, emitFn, s.manager, true)
 
-	computed := hex.EncodeToString(segHash.Sum(nil))
+	computed := ""
+	if segHash != nil {
+		computed = hex.EncodeToString(segHash.Sum(nil))
+	}
 	as.mu.Lock()
 	as.segmentDigests[segIndex] = computed
 	if segDigest != "" {

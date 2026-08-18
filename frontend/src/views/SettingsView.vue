@@ -147,7 +147,7 @@ onUnmounted(() => {
           <div>
             <label class="field-label mb-1">Experimental transport</label>
             <div class="text-xs leading-relaxed text-content-faint">
-              TCP is the stable default. QUIC tries HTTP/3 first and falls back to TCP before a transfer starts.
+              QUIC is the default transport: the client probes the peer over HTTP/3 and falls back to TCP automatically before a transfer starts. Set to TCP to disable QUIC.
             </div>
           </div>
           <button
