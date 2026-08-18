@@ -71,5 +71,7 @@ if ($makeappx) {
     Write-Warning "MakeAppx not found; cannot build .msix here. Install the Windows 10 SDK or re-run on a build machine."
 }
 
-Write-Host "`n=== 6. Verify identity from a Go process (optional) ==="
-Write-Host "Run: go run ./tools/wifidirect_probe   (should report Package identity: PRESENT and WiFiDirectDevice OK)."
+Write-Host "`n=== 6. Next step ==="
+Write-Host "Open Light, enable Wi-Fi Direct in Settings, and scan. If registration or"
+Write-Host "activation still fails, check Windows Event Viewer:"
+Write-Host "  Applications and Services Logs > Microsoft > Windows > AppxDeployment-Server"
