@@ -42,9 +42,9 @@ android {
     }
     def keystoreFile = envValue("ANDROID_KEYSTORE_FILE", "KEYSTORE_FILE")
     def keystorePassword = envValue("ANDROID_KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD")
-    def keyAlias = envValue("ANDROID_KEY_ALIAS", "KEY_ALIAS")
-    def keyPassword = envValue("ANDROID_KEY_PASSWORD", "KEY_PASSWORD")
-    def hasKeystore = [keystoreFile, keystorePassword, keyAlias, keyPassword].every {
+    def releaseKeyAlias = envValue("ANDROID_KEY_ALIAS", "KEY_ALIAS")
+    def releaseKeyPassword = envValue("ANDROID_KEY_PASSWORD", "KEY_PASSWORD")
+    def hasKeystore = [keystoreFile, keystorePassword, releaseKeyAlias, releaseKeyPassword].every {
         it != null && !it.trim().isEmpty()
     }
 
@@ -56,8 +56,8 @@ android {
             if (hasKeystore) {
                 storeFile file(keystoreFile)
                 storePassword keystorePassword
-                keyAlias keyAlias
-                keyPassword keyPassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
             }
         }
     }
