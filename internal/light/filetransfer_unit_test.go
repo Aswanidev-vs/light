@@ -29,8 +29,8 @@ func TestSanitize(t *testing.T) {
 		{"/etc/passwd", "passwd"},
 		{"plain.txt", "plain.txt"},
 		{"a/b/c", "c"},
-		{"..", ".."},
-		{"", "."},
+		{"..", "unnamed"}, // traversal names are neutralized, not passed through
+		{"", "unnamed"},
 	}
 	for _, c := range cases {
 		if got := sanitize(c.in); got != c.want {

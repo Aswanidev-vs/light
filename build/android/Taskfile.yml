@@ -52,7 +52,7 @@ tasks:
         vars:
           ARCH: '{{.ARCH | default .HOST_ARCH}}'
     vars:
-      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,android -trimpath -buildvcs=false -ldflags="-w -s -extldflags=-Wl,--gc-sections"{{else}}-tags android,debug -buildvcs=false -gcflags=all="-l"{{end}}'
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,android -trimpath -buildvcs=false -ldflags="-w -s -X light/internal/light.AppVersion={{.APP_VERSION | default "0.1.0"}} -extldflags=-Wl,--gc-sections"{{else}}-tags android,debug -buildvcs=false -gcflags=all="-l"{{end}}'
     env:
       PRODUCTION: '{{.PRODUCTION | default "false"}}'
       # Bindings generation for the Android build path goes through
@@ -121,7 +121,7 @@ tasks:
         go build -buildmode=c-shared -overlay build/android/overlay.json {{.BUILD_FLAGS}} \
           -o build/android/app/src/main/jniLibs/$JNI_DIR/libwails.so
     vars:
-      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,android -trimpath -buildvcs=false -ldflags="-w -s -extldflags=-Wl,--gc-sections"{{else}}-tags android,debug -buildvcs=false -gcflags=all="-l"{{end}}'
+      BUILD_FLAGS: '{{if eq .PRODUCTION "true"}}-tags production,android -trimpath -buildvcs=false -ldflags="-w -s -X light/internal/light.AppVersion={{.APP_VERSION | default "0.1.0"}} -extldflags=-Wl,--gc-sections"{{else}}-tags android,debug -buildvcs=false -gcflags=all="-l"{{end}}'
 
   compile:go:all-archs:
     summary: Compile Go code for all Android architectures (fat APK)
@@ -283,7 +283,7 @@ tasks:
     cmds:
       # Bindings are generated from the Go AST; CGO is disabled so the NDK
       # is not required for this step
-      - wails3 generate bindings -f '-tags android' -clean=true
+      - wails3 generate bindings -f '-tags android' -clean=true -time-type=Date -ts
     env:
       GOOS: android
       CGO_ENABLED: 0

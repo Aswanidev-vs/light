@@ -15,6 +15,12 @@ env:
   GO_VERSION: '1.25'
   NODE_VERSION: '22'
   JAVA_VERSION: '17'
+  # Compatible with the common KEYSTORE_BASE64 / KEY_ALIAS naming used by
+  # shared Android workflows, while also accepting explicit Android names.
+  KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_BASE64 }}
+  KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
+  KEY_ALIAS: ${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS }}
+  KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD }}
 
 jobs:
   build-windows:
@@ -39,6 +45,26 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            APP_VERSION="${VERSION#v}"
+            INSTALLER_VERSION="${APP_VERSION}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+            APP_VERSION="$VERSION"
+            # Inno Setup's VersionInfoVersion must remain numeric for dev builds.
+            INSTALLER_VERSION="0.1.0"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "installer_version=$INSTALLER_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+          echo "App version: $APP_VERSION"
 
       - name: Install Wails CLI
         # Keep cgo disabled for the Windows CLI build. Persisting it with
@@ -68,7 +94,7 @@ jobs:
           cd ..
 
       - name: Generate Wails bindings (Windows)
-        run: wails3 generate bindings -f "-tags=windows" -clean=true -ts
+        run: wails3 generate bindings -f "-tags=windows" -clean=true -time-type=Date -ts
         shell: bash
         env:
           CGO_ENABLED: "0"
@@ -78,7 +104,7 @@ jobs:
         shell: bash
 
       - name: Build Windows binary
-        run: go build -tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui" -o bin/light.exe
+        run: go build -tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui -X light/internal/light.AppVersion=${{ steps.version.outputs.app_version }}" -o bin/light.exe
         shell: bash
         env:
           CGO_ENABLED: "0"
@@ -92,23 +118,6 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y
         shell: bash
-
-      - name: Get version
-        id: version
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-            INSTALLER_VERSION="${VERSION#v}"
-          else
-            VERSION="dev-$(git rev-parse --short HEAD)"
-            # Inno Setup's VersionInfoVersion must remain numeric for dev builds.
-            INSTALLER_VERSION="0.1.0"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "installer_version=$INSTALLER_VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
-          echo "Installer version: $INSTALLER_VERSION"
 
       - name: Package Windows installer (Inno Setup)
         working-directory: build/windows
@@ -204,6 +213,33 @@ jobs:
         with:
           packages: platform-tools platforms;android-33 build-tools;33.0.0 ndk;26.3.11579264
 
+      - name: Prepare Android release keystore
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${KEYSTORE_BASE64:-}" ]]; then
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              echo "::error::A tagged release requires KEYSTORE_BASE64 (or ANDROID_KEYSTORE_BASE64)."
+              exit 1
+            fi
+            echo "KEYSTORE_BASE64 is not set; non-tag builds will use the debug signing fallback."
+            exit 0
+          fi
+          if [[ -z "${KEYSTORE_PASSWORD:-}" || -z "${KEY_ALIAS:-}" || -z "${KEY_PASSWORD:-}" ]]; then
+            echo "::error::KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD are required with KEYSTORE_BASE64."
+            exit 1
+          fi
+
+          KEYSTORE_PATH="${GITHUB_WORKSPACE}/build/android/app/keystore/release.jks"
+          mkdir -p "$(dirname "$KEYSTORE_PATH")"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          echo "ANDROID_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
       - name: Export Android SDK/NDK env
         run: |
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
@@ -247,7 +283,7 @@ jobs:
           export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D_Nullable= -D_Nonnull="
           export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
           export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
-          GOOS=android GOARCH=arm64 wails3 generate bindings -f "-tags=android" -clean=true -ts
+          GOOS=android GOARCH=arm64 wails3 generate bindings -f "-tags=android" -clean=true -time-type=Date -ts
           cd ..
 
       - name: Generate Android overlay
@@ -285,6 +321,21 @@ jobs:
             echo "CC not found in PATH"
           fi
 
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            APP_VERSION="${VERSION#v}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+            APP_VERSION="$VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
       - name: Build Android APK (fat)
         run: |
           set -euo pipefail
@@ -295,22 +346,12 @@ jobs:
           export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
           export CGO_CFLAGS="-I${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -D_Nullable= -D_Nonnull="
           export CGO_LDFLAGS="-L${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+          export APP_VERSION="${{ steps.version.outputs.app_version }}"
           echo "Using CC=$CC"
           "$CC" --version
           GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC="$CC" wails3 task android:package:fat
         shell: bash
 
-
-      - name: Get version
-        id: version
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-          else
-            VERSION="dev-$(git rev-parse --short HEAD)"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
 
       - name: Find and rename APK
         run: |
@@ -362,6 +403,16 @@ jobs:
           echo "=== All downloaded files ==="
           find artifacts -type f 2>/dev/null || echo "No files found"
 
+      - name: Generate release checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          : > SHA256SUMS
+          while IFS= read -r file; do
+            sha256sum "$file" >> SHA256SUMS
+          done < <(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          cat SHA256SUMS
+
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -384,7 +435,7 @@ jobs:
           gh release create "$TAG_NAME" \
             --title "Light $TAG_NAME" \
             --generate-notes \
-            "$WINDOWS_EXE" "$WINDOWS_INSTALLER" "$ANDROID_APK"
+            "$WINDOWS_EXE" "$WINDOWS_INSTALLER" "$ANDROID_APK" artifacts/SHA256SUMS
 
       - name: Delete old draft releases
         if: always()

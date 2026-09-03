@@ -16,7 +16,7 @@ android {
         minSdk 23
         targetSdk 35
         versionCode 1
-        versionName "1.0"
+        versionName System.getenv("APP_VERSION") ?: "0.1.0"
 
         // Configure supported ABIs
         ndk {
@@ -34,8 +34,19 @@ android {
         }
     }
 
-    def keystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
-    def hasKeystore = keystoreFile != null && !keystoreFile.trim().isEmpty()
+    // Accept the Android-prefixed variables used by this repository and the
+    // shorter names used by the shared Miku-style CI signing setup.
+    def envValue = { String primary, String fallback ->
+        def value = System.getenv(primary)
+        value != null && !value.trim().isEmpty() ? value : System.getenv(fallback)
+    }
+    def keystoreFile = envValue("ANDROID_KEYSTORE_FILE", "KEYSTORE_FILE")
+    def keystorePassword = envValue("ANDROID_KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD")
+    def keyAlias = envValue("ANDROID_KEY_ALIAS", "KEY_ALIAS")
+    def keyPassword = envValue("ANDROID_KEY_PASSWORD", "KEY_PASSWORD")
+    def hasKeystore = [keystoreFile, keystorePassword, keyAlias, keyPassword].every {
+        it != null && !it.trim().isEmpty()
+    }
 
     signingConfigs {
         // A real keystore can be provided via environment variables; without
@@ -44,9 +55,9 @@ android {
         release {
             if (hasKeystore) {
                 storeFile file(keystoreFile)
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                storePassword keystorePassword
+                keyAlias keyAlias
+                keyPassword keyPassword
             }
         }
     }

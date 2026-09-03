@@ -96,6 +96,10 @@ var errTransferCancelled = errors.New("transfer cancelled")
 // cancellation instead of accepting the data.
 var errReceiverCancelled = errors.New("receiver cancelled")
 
+// errReceiverRejected is what prepareAndAccept returns when the peer refused
+// the batch (or never accepted it within the wait window).
+var errReceiverRejected = errors.New("rejected by receiver")
+
 // cancellationReader aborts an inbound body read once the receiver-side cancel
 // flag is set. Checked once per chunk (1 MiB), so a cancelled inbound transfer
 // stops streaming within ~1 chunk of the click.
@@ -674,45 +678,17 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		return fmt.Errorf("no files to send")
 	}
 
-	tid := newID()
-	p := PreparePayload{
-		TransferID: tid,
-		SenderID:   s.settings.DeviceID(),
-		SenderName: s.settings.GetSettings().DeviceName,
-		SenderAddr: s.localEndpoint(),
-		SenderType: PlatformDeviceType(),
-		Files:      entries,
-	}
 	client, scheme, closeClient, err := s.clientForPeer(req.DeviceAddr)
 	if err != nil {
 		return err
 	}
 	defer closeClient()
-	body, _ := json.Marshal(p)
-	resp, err := client.Post(scheme+"://"+req.DeviceAddr+"/api/prepare", "application/json", bytes.NewReader(body))
+	tid, err := s.prepareAndAccept(client, scheme, req.DeviceAddr, entries)
 	if err != nil {
 		for _, e := range entries {
 			s.failTransfer(tid+":"+e.Name, e.Name, err.Error())
 		}
 		return err
-	}
-	statusBytes, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	status := strings.TrimSpace(string(statusBytes))
-
-	if status == "rejected" || status == "cancelled" {
-		for _, e := range entries {
-			s.failTransfer(tid+":"+e.Name, e.Name, "rejected by receiver")
-		}
-		return fmt.Errorf("rejected by receiver")
-	}
-	if status == "pending" {
-		if !s.waitAccept(req.DeviceAddr, tid, client, scheme) {
-			for _, e := range entries {
-				s.failTransfer(tid+":"+e.Name, e.Name, "rejected or timed out")
-			}
-			return fmt.Errorf("transfer not accepted")
-		}
 	}
 
 	semaphore := make(chan struct{}, s.parallelUploadLimit())
@@ -728,7 +704,22 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			if err := s.uploadWithClient(tid, req.DeviceAddr, path, file.Name, file.Size, file.Checksum, client, scheme); err != nil {
+			err := s.uploadWithClient(tid, req.DeviceAddr, path, file.Name, file.Size, file.Checksum, client, scheme)
+			if err != nil && scheme == "https" && !errors.Is(err, errReceiverCancelled) && !errors.Is(err, context.Canceled) {
+				// A socket-level failure (on Windows: WSAENOBUFS when a burst
+				// outruns the UDP send queue) tears down the whole shared QUIC
+				// connection, failing every segment at once; retrying over QUIC
+				// would re-arm the same burst. The receiver serves the same API
+				// over TCP next to QUIC, so redo this single file there with a
+				// fresh transfer id.
+				s.mu.Lock()
+				s.quicProbes[req.DeviceAddr] = quicProbeState{at: time.Now(), ok: false}
+				s.mu.Unlock()
+				if s.retryFileOverTCP(req.DeviceAddr, path, file) == nil {
+					return
+				}
+			}
+			if err != nil {
 				failuresMu.Lock()
 				failures = append(failures, fmt.Sprintf("%s: %v", file.Name, err))
 				failuresMu.Unlock()
@@ -740,6 +731,52 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 		return fmt.Errorf("%d file(s) failed: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+// prepareAndAccept registers a batch with the receiver over the given
+// transport and blocks until it accepts (or refuses). Always returns the
+// chosen transfer id, even on error, so callers can finalize the file rows
+// that were keyed by it in prepare.
+func (s *FileTransferService) prepareAndAccept(client *http.Client, scheme, peerAddr string, entries []FileManifestEntry) (string, error) {
+	tid := newID()
+	p := PreparePayload{
+		TransferID: tid,
+		SenderID:   s.settings.DeviceID(),
+		SenderName: s.settings.GetSettings().DeviceName,
+		SenderAddr: s.localEndpoint(),
+		SenderType: PlatformDeviceType(),
+		Files:      entries,
+	}
+	body, _ := json.Marshal(p)
+	resp, err := client.Post(scheme+"://"+peerAddr+"/api/prepare", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return tid, err
+	}
+	statusBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	switch strings.TrimSpace(string(statusBytes)) {
+	case "rejected", "cancelled":
+		return tid, errReceiverRejected
+	case "pending":
+		if !s.waitAccept(peerAddr, tid, client, scheme) {
+			return tid, errors.New("transfer not accepted")
+		}
+	}
+	return tid, nil
+}
+
+// retryFileOverTCP redoes one file over TCP with a fresh transfer id after
+// the QUIC path failed in flight. A fresh id is required because the failed
+// QUIC attempt left the receiver's reassembly for the old id marked failed;
+// the receiver serves the same API over TCP next to QUIC, so no probe is
+// needed here.
+func (s *FileTransferService) retryFileOverTCP(peerAddr, path string, entry FileManifestEntry) error {
+	client := s.sharedTCPClient()
+	tid, err := s.prepareAndAccept(client, "http", peerAddr, []FileManifestEntry{entry})
+	if err != nil {
+		return err
+	}
+	return s.uploadWithClient(tid, peerAddr, path, entry.Name, entry.Size, entry.Checksum, client, "http")
 }
 
 // parallelUploadLimit returns the maximum number of files uploaded concurrently.
@@ -898,6 +935,7 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 	var wg sync.WaitGroup
 	var failuresMu sync.Mutex
 	var failures []string
+	var failureErrs []error
 	var checksumMu sync.Mutex
 	var receiverChecksum string
 	for i := 0; i < segCount; i++ {
@@ -913,6 +951,7 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 			if err != nil {
 				failuresMu.Lock()
 				failures = append(failures, fmt.Sprintf("segment %d: %v", i, err))
+				failureErrs = append(failureErrs, err)
 				failuresMu.Unlock()
 				return
 			}
@@ -926,7 +965,10 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 	wg.Wait()
 	if len(failures) > 0 {
 		s.failTransfer(subID, fname, strings.Join(failures, "; "))
-		return fmt.Errorf("%d segment(s) failed: %s", len(failures), strings.Join(failures, "; "))
+		// Join the underlying errors (not only their text) so SendFiles can
+		// still classify cancellations via errors.Is when deciding whether a
+		// failed QUIC upload should fall back to TCP.
+		return fmt.Errorf("%d segment(s) failed: %w", len(failures), errors.Join(failureErrs...))
 	}
 	return s.verifyAndComplete(subID, fname, size, receiverChecksum, &senderChecksum, hashDone, &hashErr)
 }

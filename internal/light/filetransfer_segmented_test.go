@@ -467,3 +467,51 @@ func TestSendFilesEndToEndTCP(t *testing.T) {
 	check("b.txt", smallB)
 	check("big.bin", big)
 }
+
+// TestRetryFileOverTCP drives the QUIC-failure TCP fallback path end to end:
+// a fresh transfer id prepared over TCP, then the (segmented) upload re-run,
+// landing the file intact on the receiver.
+func TestRetryFileOverTCP(t *testing.T) {
+	setHome(t)
+	downloadDir := t.TempDir()
+	defer os.RemoveAll(downloadDir)
+	receiverManager := &TransferManager{active: make(map[string]*Transfer)}
+	receiverSettings := &SettingsService{cfg: Settings{DownloadDir: downloadDir, AutoAccept: true}}
+	receiver := NewFileTransferService(nil, receiverManager, receiverSettings, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/prepare", receiver.handlePrepare)
+	mux.HandleFunc("/api/transfer", receiver.handleTransfer)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	senderManager := &TransferManager{active: make(map[string]*Transfer)}
+	sender := NewFileTransferService(nil, senderManager, &SettingsService{}, nil)
+	sender.deviceType = DeviceTypeDesktop
+
+	size := int64(segmentMinSize) + 12345
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	srcPath := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := FileManifestEntry{Name: "big.bin", Size: size}
+	if err := sender.retryFileOverTCP(server.Listener.Addr().String(), srcPath, entry); err != nil {
+		t.Fatalf("retryFileOverTCP: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(downloadDir, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("reassembled %d bytes, want %d", len(got), len(payload))
+	}
+	history := senderManager.GetHistory(1)
+	if len(history) != 1 || history[0].Status != StatusCompleted {
+		t.Fatalf("sender history = %#v, want one completed transfer", history)
+	}
+}

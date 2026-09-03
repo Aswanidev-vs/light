@@ -6,12 +6,14 @@ import * as FileTransferService from "./filetransferservice.js";
 import * as QRCodeService from "./qrcodeservice.js";
 import * as SettingsService from "./settingsservice.js";
 import * as TransferManager from "./transfermanager.js";
+import * as UpdateService from "./updateservice.js";
 export {
     DiscoveryService,
     FileTransferService,
     QRCodeService,
     SettingsService,
-    TransferManager
+    TransferManager,
+    UpdateService
 };
 
 export {
@@ -22,6 +24,7 @@ export {
     Transfer,
     TransferRequest,
     TransferStatus,
+    UpdateInfo,
     WifiDirectPeer
 } from "./models.js";
 

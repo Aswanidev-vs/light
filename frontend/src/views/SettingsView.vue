@@ -4,11 +4,21 @@ import { useSettings } from '../composables/useSettings'
 import { SettingsService } from '../../bindings/light/internal/light'
 import { RestartServer } from '../../bindings/light/internal/light/filetransferservice'
 import { useUI } from '../composables/useUI'
+import { useUpdater } from '../composables/useUpdater'
 import { Events } from '@wailsio/runtime'
 import Icon from '../components/common/Icon.vue'
 
 const { settings } = useSettings()
 const { toast } = useUI()
+const {
+  info: updateInfo,
+  phase: updatePhase,
+  error: updateError,
+  check: checkForUpdates,
+  install: installUpdate,
+  restart: restartUpdate,
+  openRelease: openUpdateRelease,
+} = useUpdater()
 
 const wifiDirectSupported = ref(true)
 SettingsService.WifiDirectSupported().then((v) => {
@@ -217,6 +227,52 @@ onUnmounted(() => {
 
       <!-- Save -->
       <button class="btn-accent w-full self-start sm:w-auto" @click="save">Save settings</button>
+    </div>
+
+    <div class="card mt-5 flex w-full max-w-3xl flex-col gap-4 p-4 sm:mt-6 sm:p-5 lg:p-6">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div class="page-kicker mb-1">Software</div>
+          <h2 class="text-base font-semibold text-content">Updates</h2>
+          <p class="mt-1 text-xs leading-relaxed text-content-faint">
+            {{ updateInfo?.currentVersion ? `Running Light ${updateInfo.currentVersion}` : 'Checking the installed version…' }}
+          </p>
+        </div>
+        <span
+          v-if="updatePhase === 'up-to-date'"
+          class="inline-flex w-fit items-center gap-1.5 rounded-full bg-ok/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-ok"
+        >
+          <Icon name="check" :size="13" />
+          Up to date
+        </span>
+        <span v-else-if="updatePhase === 'checking'" class="text-xs text-content-faint">Checking…</span>
+        <span v-else-if="updateInfo?.available" class="text-xs font-medium text-accent">{{ updateInfo.version }} available</span>
+      </div>
+
+      <p v-if="updatePhase === 'error'" class="text-xs leading-relaxed text-danger">{{ updateError }}</p>
+      <p v-else-if="updatePhase === 'ready'" class="text-xs leading-relaxed text-ok">The update is downloaded and ready to apply.</p>
+      <p v-else-if="updateInfo?.available && !updateInfo.canInstall" class="text-xs leading-relaxed text-content-muted">
+        This platform can check releases but needs the downloaded package to be installed manually.
+      </p>
+
+      <div class="flex flex-wrap gap-2">
+        <button class="btn-ghost border border-white/10" :disabled="updatePhase === 'checking'" @click="checkForUpdates">
+          <Icon name="refresh" :size="16" />
+          Check for updates
+        </button>
+        <button v-if="updateInfo?.available && updateInfo.canInstall && updatePhase !== 'ready'" class="btn-accent" @click="installUpdate">
+          <Icon name="download" :size="16" />
+          Update now
+        </button>
+        <button v-if="updatePhase === 'ready'" class="btn-accent" @click="restartUpdate">
+          <Icon name="refresh" :size="16" />
+          Restart to apply
+        </button>
+        <button v-if="updateInfo?.available && !updateInfo.canInstall" class="btn-ghost border border-white/10" @click="openUpdateRelease">
+          <Icon name="link" :size="16" />
+          Open release
+        </button>
+      </div>
     </div>
   </div>
 </template>
