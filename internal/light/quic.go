@@ -32,8 +32,13 @@ func lightQUICConfig() *quic.Config {
 	return &quic.Config{
 		InitialStreamReceiveWindow:     2 << 20,  // 2 MiB
 		MaxStreamReceiveWindow:         16 << 20, // 16 MiB
-		InitialConnectionReceiveWindow: 8 << 20,  // 8 MiB
-		MaxConnectionReceiveWindow:     64 << 20, // 64 MiB
+		InitialConnectionReceiveWindow: 8 << 20, // 8 MiB
+		// The connection window caps total in-flight bytes. 64 MiB let a
+		// multi-stream upload burst far more than the Windows UDP send path
+		// can drain: WSASendTo then fails with WSAENOBUFS, and quic-go treats
+		// that socket error as fatal, killing every stream on the connection.
+		// 16 MiB still carries multi-GB/s at LAN RTTs.
+		MaxConnectionReceiveWindow:     16 << 20, // 16 MiB
 		MaxIdleTimeout:                 15 * time.Minute,
 		MaxIncomingStreams:             1000, // admit many parallel upload streams
 		Allow0RTT:                      true, // reuse sessions to known peers, skip handshake

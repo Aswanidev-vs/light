@@ -20,6 +20,7 @@ func main() {
 	discovery := lightapp.NewDiscoveryService(nil, settings)
 	transfer := lightapp.NewFileTransferService(nil, manager, settings, discovery)
 	qr := lightapp.NewQRCodeService(nil, settings, discovery)
+	updates := lightapp.NewUpdateService(nil)
 
 	app := application.New(application.Options{
 		Name:        "Light",
@@ -31,6 +32,7 @@ func main() {
 			application.NewService(discovery),
 			application.NewService(transfer),
 			application.NewService(qr),
+			application.NewService(updates),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -44,6 +46,7 @@ func main() {
 	discovery.SetApp(app)
 	transfer.SetApp(app)
 	qr.SetApp(app)
+	updates.SetApp(app)
 
 	if err := transfer.StartServer(); err != nil {
 		log.Printf("Warning: transfer server failed to start: %v", err)
@@ -53,10 +56,10 @@ func main() {
 	}
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:    "Light",
-		Width:    1100,
-		Height:   720,
-		MinWidth: 820,
+		Title:     "Light",
+		Width:     1100,
+		Height:    720,
+		MinWidth:  820,
 		MinHeight: 600,
 	})
 

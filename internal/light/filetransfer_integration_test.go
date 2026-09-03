@@ -91,7 +91,8 @@ func TestFileTransferHTTPIntegration(t *testing.T) {
 		t.Fatalf("transfer response = %q, want %q", got, "ok "+checksum)
 	}
 
-	stored, err := os.ReadFile(filepath.Join(downloadDir, filename))
+	// The receiver stores the file under its sanitized name.
+	stored, err := os.ReadFile(filepath.Join(downloadDir, sanitize(filename)))
 	if err != nil {
 		t.Fatal(err)
 	}

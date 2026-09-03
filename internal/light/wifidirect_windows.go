@@ -74,6 +74,12 @@ var (
 type windowsWifiDirectManager struct {
 	mu     sync.Mutex
 	device *ole.IInspectable // WiFiDirectDevice held until Close() releases it.
+
+	// The advertisement path shares this manager with Connect/Discover. Keep
+	// the listener and publisher alive for as long as WinRT owns their event
+	// registrations; StopAdvertising releases both and removes the handlers.
+	listener, publisher    *ole.IInspectable
+	connToken, statusToken int64
 }
 
 // newPlatformWifiDirectManager returns the Windows Wi-Fi Direct manager. The
@@ -242,6 +248,8 @@ func (m *windowsWifiDirectManager) Connect(ctx context.Context, peerID string) (
 
 // Close disposes the held WiFiDirectDevice, if any.
 func (m *windowsWifiDirectManager) Close() error {
+	_ = m.StopAdvertising()
+
 	m.mu.Lock()
 	if m.device != nil {
 		releaseInspectable(m.device)

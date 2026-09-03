@@ -123,8 +123,11 @@ export class Settings {
     "enableEncryption": boolean;
 
     /**
-     * TransportMode controls outgoing transport selection. TCP is the stable
-     * default; QUIC probes HTTP/3 first and falls back to TCP before uploading.
+     * TransportMode controls outgoing transport selection. QUIC (HTTP/3) is the
+     * default and preferred transport: the client probes the peer over HTTP/3
+     * and falls back to TCP automatically before uploading if UDP/QUIC is
+     * unavailable or the peer does not support it. Set to "tcp" to force plain
+     * TCP for outgoing transfers.
      */
     "transportMode": string;
 
@@ -290,6 +293,49 @@ export enum TransferStatus {
     StatusFailed = "failed",
     StatusCancelled = "cancelled",
 };
+
+/**
+ * UpdateInfo is the UI-safe subset of a GitHub release. The full release is
+ * kept by Wails' updater so DownloadAndInstall can reuse its verified artifact.
+ */
+export class UpdateInfo {
+    "supported": boolean;
+    "canInstall": boolean;
+    "currentVersion": string;
+    "available": boolean;
+    "version"?: string;
+    "name"?: string;
+    "notes"?: string;
+    "releaseUrl"?: string;
+    "publishedAt"?: string;
+    "artifactSize"?: number;
+
+    /** Creates a new UpdateInfo instance. */
+    constructor($$source: Partial<UpdateInfo> = {}) {
+        if (!("supported" in $$source)) {
+            this["supported"] = false;
+        }
+        if (!("canInstall" in $$source)) {
+            this["canInstall"] = false;
+        }
+        if (!("currentVersion" in $$source)) {
+            this["currentVersion"] = "";
+        }
+        if (!("available" in $$source)) {
+            this["available"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new UpdateInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): UpdateInfo {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new UpdateInfo($$parsedSource as Partial<UpdateInfo>);
+    }
+}
 
 /**
  * WifiDirectManager establishes a Wi-Fi Direct (P2P) link to a peer and reports
