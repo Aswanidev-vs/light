@@ -4,13 +4,16 @@ import { Dialogs } from '@wailsio/runtime'
 import { FileTransferService } from '../../../bindings/light/internal/light'
 import { useTransfers } from '../../composables/useTransfers'
 import { useUI } from '../../composables/useUI'
+import { useBulkShare } from '../../composables/useBulkShare'
 import FileRow from './FileRow.vue'
+import BulkShareSheet from './BulkShareSheet.vue'
 import Icon from '../common/Icon.vue'
 import type { Device } from '../../types'
 
 const props = defineProps<{ device: Device }>()
 const { transfers, pause, resume, cancel } = useTransfers()
 const { toast } = useUI()
+const bulk = useBulkShare()
 const dragOver = ref(false)
 
 async function pickFiles() {
@@ -44,6 +47,8 @@ async function send(paths: string[]) {
   } catch (e: any) {
     toast(e?.message || 'Send failed', 'error')
   } finally {
+    // On Android the picker handed us live sources in an in-process read
+    // server; release them once the batch has finished either way.
     if (typeof window !== 'undefined' && (window as any).wails?.platform?.() === 'android') {
       ;(window as any).wails.cleanupPickedFiles?.(JSON.stringify(paths))
     }
@@ -70,6 +75,20 @@ const hasTransfers = computed(() => transfers.value.length > 0)
       <p class="min-w-0 max-w-full truncate text-sm text-content-faint">Sending to {{ device.name }}</p>
     </div>
 
+    <!-- Bulk Share: stage many files across categories before sending. -->
+    <div class="flex flex-wrap items-center gap-3 rounded-xl border border-white/5 bg-surface-0/40 px-4 py-3">
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-medium">Bulk Share</p>
+        <p class="text-xs text-content-faint">
+          Gather images, video, audio, documents and game files, then send them together.
+        </p>
+      </div>
+      <button class="btn-accent shrink-0" @click="bulk.show()">
+        <Icon name="file" :size="16" />
+        Choose files
+      </button>
+    </div>
+
     <div class="min-h-0 flex-1 overflow-y-auto pr-0.5">
       <p v-if="!hasTransfers" class="grid h-full place-items-center text-sm text-content-faint">No transfers yet</p>
       <div v-else class="flex flex-col gap-2">
@@ -83,5 +102,7 @@ const hasTransfers = computed(() => transfers.value.length > 0)
         />
       </div>
     </div>
+
+    <BulkShareSheet :device="device" @send="send" />
   </div>
 </template>

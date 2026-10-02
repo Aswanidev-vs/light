@@ -109,6 +109,39 @@ export class Diagnostics {
     }
 }
 
+/**
+ * SendFileStat describes one sendable source for the Bulk Share picker.
+ */
+export class SendFileStat {
+    "name": string;
+    "size": number;
+
+    /**
+     * Error is set when the source could not be resolved; Size is then unknown.
+     */
+    "error"?: string;
+
+    /** Creates a new SendFileStat instance. */
+    constructor($$source: Partial<SendFileStat> = {}) {
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SendFileStat instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SendFileStat {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SendFileStat($$parsedSource as Partial<SendFileStat>);
+    }
+}
+
 export class Settings {
     "deviceName": string;
     "port": number;
@@ -196,6 +229,12 @@ export class Transfer {
     "status": TransferStatus;
     "error"?: string;
     "filePath"?: string;
+
+    /**
+     * BatchDir is the subfolder a multi-file batch lands in on the receiver.
+     * Empty for a single-file transfer, which lands flat in the download dir.
+     */
+    "batchDir"?: string;
     "checksum"?: string;
     "startedAt": Date;
     "completedAt"?: Date | null;
@@ -234,14 +273,14 @@ export class Transfer {
      * Creates a new Transfer instance from a string or object.
      */
     static createFrom($$source: any = {}): Transfer {
-        const $$createField10_0 = $Create.DateFromTime;
-        const $$createField11_0 = $$createType0;
+        const $$createField11_0 = $Create.DateFromTime;
+        const $$createField12_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("startedAt" in $$parsedSource) {
-            $$parsedSource["startedAt"] = $$createField10_0($$parsedSource["startedAt"]);
+            $$parsedSource["startedAt"] = $$createField11_0($$parsedSource["startedAt"]);
         }
         if ("completedAt" in $$parsedSource) {
-            $$parsedSource["completedAt"] = $$createField11_0($$parsedSource["completedAt"]);
+            $$parsedSource["completedAt"] = $$createField12_0($$parsedSource["completedAt"]);
         }
         return new Transfer($$parsedSource as Partial<Transfer>);
     }

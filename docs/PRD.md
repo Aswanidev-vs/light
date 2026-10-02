@@ -33,12 +33,17 @@ Light is a high-speed, cross-platform file sharing application built with Wails3
 ### 4.2 File Sending
 - Drag-and-drop file selection
 - Multi-file selection via file picker
+- Bulk Share: stage a selection by category (images, video, audio, documents,
+  games) and send the whole set as one batch
+- Picked Android documents stream in place, without a local duplicate
 - Folder/directory sending (recursive)
 - File size display and validation
 - Send to any discovered device
 
 ### 4.3 File Receiving
 - Incoming transfer notification with accept/reject prompt
+- Per-file consent within a batch: untick files to skip them
+- Multi-file batches land in a dated subfolder of the download directory
 - Auto-accept mode (configurable per device or globally)
 - Download to default or custom directory
 - File type preview (image thumbnails, text previews)

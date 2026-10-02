@@ -81,7 +81,12 @@ func TestQUICHTTP3Integration(t *testing.T) {
 	}
 	senderManager := &TransferManager{active: make(map[string]*Transfer)}
 	sender := NewFileTransferService(nil, senderManager, &SettingsService{}, nil)
-	if err := sender.uploadWithClient(transferID, packetConn.LocalAddr().String(), sourcePath, "quic.txt", int64(len(payload)), checksum, client, "https"); err != nil {
+	src, err := openSendSource(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if err := sender.uploadWithClient(transferID, packetConn.LocalAddr().String(), src, FileManifestEntry{Name: "quic.txt", Size: int64(len(payload)), Checksum: checksum}, client, "https"); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := os.ReadFile(filepath.Join(downloadDir, "quic.txt"))

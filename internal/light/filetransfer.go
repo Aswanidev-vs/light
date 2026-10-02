@@ -41,7 +41,19 @@ const (
 	// to bound CPU and disk pressure.
 	maxSegmentsPerFile    = 8
 	mobileSegmentsPerFile = 4
+	// acceptIdleTTL is how long an inbound batch may sit idle before its entry is
+	// dropped from s.accepts. Every request a batch serves rearms it, so this
+	// only fires for batches that have genuinely gone quiet.
+	acceptIdleTTL = 5 * time.Minute
+	// fileNotSelectedBody is the receiver's answer when the user unticked a file
+	// in the accept prompt. The sender keys its "skipped" classification off it.
+	fileNotSelectedBody = "file not selected"
 )
+
+// errFileNotSelected reports that the receiver declined one file of a batch. It
+// is a skip, not a failure: the sender finalises the row without counting it
+// among the failed files.
+var errFileNotSelected = errors.New("receiver did not select this file")
 
 var transferBufferPool = sync.Pool{
 	New: func() any { return make([]byte, chunkSize) },
@@ -123,10 +135,49 @@ type acceptState struct {
 	// files lists the filenames from the prepare payload so a receive-side
 	// cancel can finalize every row of the batch, not just the clicked one.
 	files []string
+	// allowed is the subset of files the receiver consented to. A nil map means
+	// every file in the batch is allowed, which is what an older client (or
+	// auto-accept) sends; a non-nil map lets the user untick individual files in
+	// the accept prompt.
+	allowed map[string]bool
+	// destDir is where every file of this batch lands. Computed once at prepare
+	// time so all files of a batch share one dated subfolder.
+	destDir string
+	// evict is the pending cleanup timer for this entry. It is rearmed on every
+	// request the batch serves, so a long transfer can never be evicted while it
+	// is still in flight.
+	evict *time.Timer
 	// cancelled is set by CancelTransfer on the receiving device; inbound
 	// readers observe it and abort mid-stream. Atomic so hot-path reads need
 	// no lock.
 	cancelled atomic.Bool
+}
+
+// permits reports whether a file of the batch may be written.
+func (st *acceptState) permits(fname string) bool {
+	return st != nil && (st.allowed == nil || st.allowed[fname])
+}
+
+// touch rearms the batch's cleanup timer. The map was never pruned, so every
+// inbound transfer used to leak an entry for the life of the process; an
+// inactivity timer bounds that growth without racing a transfer in flight.
+func (s *FileTransferService) touch(tid string, st *acceptState) {
+	s.mu.Lock()
+	if st != nil {
+		if st.evict != nil {
+			st.evict.Stop()
+		}
+		st.evict = time.AfterFunc(acceptIdleTTL, func() {
+			s.mu.Lock()
+			// Only drop this exact entry: a newer batch may already have taken
+			// the slot, and an entry that was re-armed must survive.
+			if current, ok := s.accepts[tid]; ok && current == st {
+				delete(s.accepts, tid)
+			}
+			s.mu.Unlock()
+		})
+	}
+	s.mu.Unlock()
 }
 
 // isCancelled returns a lock-free predicate the inbound readers poll once per
@@ -411,6 +462,7 @@ func (s *FileTransferService) handlePrepare(w http.ResponseWriter, r *http.Reque
 	st.senderAddr = p.SenderAddr
 	st.senderType = p.SenderType
 	s.mu.Unlock()
+	s.touch(p.TransferID, st)
 
 	for _, f := range p.Files {
 		s.manager.RecordTransfer(&Transfer{
@@ -435,6 +487,55 @@ func (s *FileTransferService) handlePrepare(w http.ResponseWriter, r *http.Reque
 	}
 	w.WriteHeader(202)
 	w.Write([]byte("pending"))
+}
+
+// ensureDestDir resolves and memoises the directory a batch's files land in. It
+// is computed lazily on the first byte rather than at prepare time, so a batch
+// that is never accepted never creates a folder and /api/prepare stays a pure
+// bookkeeping call that cannot fail over a filesystem problem.
+func (s *FileTransferService) ensureDestDir(st *acceptState) (string, error) {
+	if st == nil {
+		return s.receiveDir()
+	}
+	s.mu.Lock()
+	dir := st.destDir
+	fileCount := len(st.files)
+	s.mu.Unlock()
+	if dir != "" {
+		return dir, nil
+	}
+	dir, err := s.batchDirFor(fileCount)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	if st.destDir == "" {
+		st.destDir = dir
+	}
+	dir = st.destDir
+	s.mu.Unlock()
+	return dir, nil
+}
+
+// batchDirFor returns the directory a batch's files should land in. A
+// multi-file batch gets its own dated subfolder so a 50-file transfer does not
+// scatter across the download directory; a single file lands flat, exactly as
+// before. Mobile is excluded because its receive dir is an app-internal staging
+// area whose files are then copied one by one into the user's SAF folder, so a
+// staging subfolder would buy nothing.
+func (s *FileTransferService) batchDirFor(fileCount int) (string, error) {
+	dir, err := s.receiveDir()
+	if err != nil {
+		return "", err
+	}
+	if fileCount < 2 || PlatformDeviceType() == DeviceTypeMobile {
+		return dir, nil
+	}
+	dir = filepath.Join(dir, "Bulk-"+time.Now().Format("2006-01-02"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func (s *FileTransferService) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -479,14 +580,25 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 	senderID := ""
 	senderAddr := ""
 	senderType := DeviceType("")
+	permitted := false
 	if st != nil {
 		senderID = st.senderID
 		senderAddr = st.senderAddr
 		senderType = st.senderType
+		permitted = st.permits(fname)
 	}
 	s.mu.Unlock()
 	if !accepted {
 		http.Error(w, "not accepted", 409)
+		return
+	}
+	// This request proves the batch is still live, so keep it out of the
+	// cleanup path for another idle window.
+	s.touch(tid, st)
+	if !permitted {
+		// The receiver unticked this file. Answer with a distinct body so the
+		// sender reports it as skipped rather than as a failed transfer.
+		http.Error(w, fileNotSelectedBody, 409)
 		return
 	}
 
@@ -500,7 +612,7 @@ func (s *FileTransferService) handleTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dl, err := s.receiveDir()
+	dl, err := s.ensureDestDir(st)
 	if err != nil {
 		http.Error(w, "cannot create destination dir: "+err.Error(), 500)
 		return
@@ -667,11 +779,11 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 	var entries []FileManifestEntry
 	var paths []string
 	for _, p := range req.FilePaths {
-		info, err := os.Stat(p)
+		name, size, err := statSendSource(p)
 		if err != nil {
 			continue
 		}
-		entries = append(entries, FileManifestEntry{Name: filepath.Base(p), Size: info.Size()})
+		entries = append(entries, FileManifestEntry{Name: name, Size: size})
 		paths = append(paths, p)
 	}
 	if len(entries) == 0 {
@@ -704,7 +816,18 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			err := s.uploadWithClient(tid, req.DeviceAddr, path, file.Name, file.Size, file.Checksum, client, scheme)
+			// Open once per file and hand the same source to the upload and to
+			// the TCP retry, so a picker-backed file is resolved a single time.
+			src, err := openSendSource(path)
+			if err != nil {
+				failuresMu.Lock()
+				failures = append(failures, fmt.Sprintf("%s: %v", file.Name, err))
+				failuresMu.Unlock()
+				return
+			}
+			defer src.Close()
+
+			err = s.uploadWithClient(tid, req.DeviceAddr, src, file, client, scheme)
 			if err != nil && scheme == "https" && !errors.Is(err, errReceiverCancelled) && !errors.Is(err, context.Canceled) {
 				// A socket-level failure (on Windows: WSAENOBUFS when a burst
 				// outruns the UDP send queue) tears down the whole shared QUIC
@@ -715,7 +838,7 @@ func (s *FileTransferService) SendFiles(req TransferRequest) error {
 				s.mu.Lock()
 				s.quicProbes[req.DeviceAddr] = quicProbeState{at: time.Now(), ok: false}
 				s.mu.Unlock()
-				if s.retryFileOverTCP(req.DeviceAddr, path, file) == nil {
+				if s.retryFileOverTCP(req.DeviceAddr, src, file) == nil {
 					return
 				}
 			}
@@ -770,13 +893,13 @@ func (s *FileTransferService) prepareAndAccept(client *http.Client, scheme, peer
 // QUIC attempt left the receiver's reassembly for the old id marked failed;
 // the receiver serves the same API over TCP next to QUIC, so no probe is
 // needed here.
-func (s *FileTransferService) retryFileOverTCP(peerAddr, path string, entry FileManifestEntry) error {
+func (s *FileTransferService) retryFileOverTCP(peerAddr string, src sendSource, entry FileManifestEntry) error {
 	client := s.sharedTCPClient()
 	tid, err := s.prepareAndAccept(client, "http", peerAddr, []FileManifestEntry{entry})
 	if err != nil {
 		return err
 	}
-	return s.uploadWithClient(tid, peerAddr, path, entry.Name, entry.Size, entry.Checksum, client, "http")
+	return s.uploadWithClient(tid, peerAddr, src, entry, client, "http")
 }
 
 // parallelUploadLimit returns the maximum number of files uploaded concurrently.
@@ -865,7 +988,8 @@ func (s *FileTransferService) peerCancelProbe(client *http.Client, scheme, peerA
 	return resp.StatusCode == 200 && strings.TrimSpace(string(b)) == "cancelled"
 }
 
-func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname string, size int64, _ string, client *http.Client, scheme string) error {
+func (s *FileTransferService) uploadWithClient(tid, peerAddr string, src sendSource, file FileManifestEntry, client *http.Client, scheme string) error {
+	fname, size := file.Name, file.Size
 	subID := tid + ":" + fname
 	ctx, cancel := context.WithCancel(context.Background())
 	ctrl := &sendControl{status: StatusActive, resumeCh: make(chan struct{})}
@@ -890,16 +1014,16 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 	// never delays the first byte on the wire. Segmented uploads no longer
 	// declare per-segment digests, so the digest is only needed for the final
 	// comparison; the receiver verifies the on-disk bytes itself.
-	hashFile, herr := os.Open(filePath)
+	hashSrc, herr := src.Open()
 	var senderChecksum string
 	var hashErr error
 	hashDone := make(chan struct{})
 	if herr == nil {
 		go func() {
 			defer close(hashDone)
-			defer hashFile.Close()
+			defer hashSrc.Close()
 			h := sha256.New()
-			if _, e := io.Copy(h, hashFile); e != nil {
+			if _, e := io.Copy(h, hashSrc); e != nil {
 				hashErr = e
 				return
 			}
@@ -915,8 +1039,12 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 	fileStart := time.Now()
 
 	if segCount <= 1 {
-		rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, 0, size, filePath, subID, ctrl, 0, 1, fileStart, nil)
+		rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, 0, size, src, subID, ctrl, 0, 1, fileStart, nil)
 		if err != nil {
+			if errors.Is(err, errFileNotSelected) {
+				// uploadRange already finalised the row; not a failure.
+				return nil
+			}
 			return err
 		}
 		return s.verifyAndComplete(subID, fname, size, rc, &senderChecksum, hashDone, &hashErr)
@@ -938,6 +1066,7 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 	var failureErrs []error
 	var checksumMu sync.Mutex
 	var receiverChecksum string
+	var skipped atomic.Bool
 	for i := 0; i < segCount; i++ {
 		start := int64(0)
 		if i > 0 {
@@ -947,8 +1076,12 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 		wg.Add(1)
 		go func(i int, start, end int64) {
 			defer wg.Done()
-			rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, start, end-start, filePath, subID, ctrl, i, segCount, fileStart, &totalSent)
+			rc, err := s.uploadRange(ctx, client, scheme, peerAddr, tid, fname, size, start, end-start, src, subID, ctrl, i, segCount, fileStart, &totalSent)
 			if err != nil {
+				if errors.Is(err, errFileNotSelected) {
+					skipped.Store(true)
+					return
+				}
 				failuresMu.Lock()
 				failures = append(failures, fmt.Sprintf("segment %d: %v", i, err))
 				failureErrs = append(failureErrs, err)
@@ -963,6 +1096,11 @@ func (s *FileTransferService) uploadWithClient(tid, peerAddr, filePath, fname st
 		}(i, start, end)
 	}
 	wg.Wait()
+	if skipped.Load() {
+		// The receiver declined this file; uploadRange already finalised the row,
+		// so there is nothing to verify or count as a failure.
+		return nil
+	}
 	if len(failures) > 0 {
 		s.failTransfer(subID, fname, strings.Join(failures, "; "))
 		// Join the underlying errors (not only their text) so SendFiles can
@@ -998,15 +1136,8 @@ func (s *FileTransferService) segmentCount(size int64) int {
 // HTTP request. For segmented transfers it carries X-Segment-* headers; the
 // final segment's response carries the receiver's whole-file checksum, which
 // the caller verifies against the sender's.
-func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Client, scheme, peerAddr, tid, fname string, size, offset, length int64, filePath, subID string, ctrl *sendControl, segIndex, segCount int, started time.Time, totalSent *int64) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		s.failTransfer(subID, fname, err.Error())
-		return "", err
-	}
-	defer f.Close()
-
-	section := io.NewSectionReader(f, offset, length)
+func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Client, scheme, peerAddr, tid, fname string, size, offset, length int64, src sendSource, subID string, ctrl *sendControl, segIndex, segCount int, started time.Time, totalSent *int64) (string, error) {
+	section := io.NewSectionReader(src, offset, length)
 	cr := &countingReader{
 		r:        section,
 		ctrl:     ctrl,
@@ -1057,6 +1188,14 @@ func (s *FileTransferService) uploadRange(ctx context.Context, client *http.Clie
 	respBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
+		// The receiver unticked this file in the accept prompt. Finalise the row
+		// and surface a sentinel so SendFiles reports it as skipped rather than
+		// counting it as a failure.
+		if resp.StatusCode == 409 && strings.Contains(string(respBody), fileNotSelectedBody) {
+			s.manager.Cancel(subID)
+			s.emit(map[string]string{"id": subID}, "transfer-cancelled")
+			return "", errFileNotSelected
+		}
 		// A cancellation answering 499 (new receivers) or surfacing as another
 		// status (older ones mid-read) both resolve through the status probe.
 		if resp.StatusCode == 499 || s.peerCancelProbe(client, scheme, peerAddr, tid) {
@@ -1117,14 +1256,20 @@ func (s *FileTransferService) verifyAndComplete(subID, fname string, size int64,
 // to land skips the whole-file read-back hash. Otherwise the assembled file is
 // hashed once before the rename.
 func (s *FileTransferService) handleSegmentedTransfer(w http.ResponseWriter, r *http.Request, tid, fname string, size, offset, segIndex, segCount int64, checksum, segDigest, senderID, senderAddr string, senderType DeviceType) {
-	dl, err := s.receiveDir()
+	s.mu.Lock()
+	st := s.accepts[tid]
+	s.mu.Unlock()
+	if st == nil {
+		http.Error(w, "not accepted", 409)
+		return
+	}
+	// Each range keeps the batch's cleanup timer pushed back.
+	s.touch(tid, st)
+	dl, err := s.ensureDestDir(st)
 	if err != nil {
 		http.Error(w, "cannot create destination dir: "+err.Error(), 500)
 		return
 	}
-	s.mu.Lock()
-	st := s.accepts[tid]
-	s.mu.Unlock()
 	key := tid + "\x00" + fname
 	now := time.Now()
 	val, _ := s.assemblies.LoadOrStore(key, &assemblyState{
@@ -1482,9 +1627,29 @@ func (s *FileTransferService) cancelInbound(id string) {
 	}
 }
 
+// StatFiles resolves the display name and size of send-side paths without
+// reading their contents. The Bulk Share picker uses it to show a running total
+// for a staged selection before anything is sent; the native pickers only hand
+// back paths, so there is no other way to learn the sizes.
+func (s *FileTransferService) StatFiles(paths []string) []SendFileStat {
+	out := make([]SendFileStat, 0, len(paths))
+	for _, p := range paths {
+		name, size, err := statSendSource(p)
+		if err != nil {
+			out = append(out, SendFileStat{Name: sendSourceName(p), Error: err.Error()})
+			continue
+		}
+		out = append(out, SendFileStat{Name: name, Size: size})
+	}
+	return out
+}
+
 // ---- Accept / reject (receiver side) ----
 
-func (s *FileTransferService) AcceptReceive(transferID string, _ []string) {
+// AcceptReceive accepts an inbound batch. selected is the subset of filenames the
+// receiver consented to; a nil slice means the whole batch, which is what an
+// older client (and auto-accept) sends.
+func (s *FileTransferService) AcceptReceive(transferID string, selected []string) {
 	s.mu.Lock()
 	st, ok := s.accepts[transferID]
 	if !ok {
@@ -1492,7 +1657,16 @@ func (s *FileTransferService) AcceptReceive(transferID string, _ []string) {
 		s.accepts[transferID] = st
 	}
 	st.status = "accepted"
+	if selected != nil {
+		st.allowed = make(map[string]bool, len(selected))
+		for _, f := range selected {
+			st.allowed[f] = true
+		}
+	}
 	s.mu.Unlock()
+	// A rejected batch that the sender is still polling may now be accepted, so
+	// cancel any pending cleanup before rearming it.
+	s.touch(transferID, st)
 }
 
 func (s *FileTransferService) RejectReceive(transferID string) {
@@ -1504,6 +1678,9 @@ func (s *FileTransferService) RejectReceive(transferID string) {
 	}
 	st.status = "rejected"
 	s.mu.Unlock()
+	// The sender polls /api/status/{tid} to learn of the rejection, and
+	// handleStatus 404s once the entry is gone, so keep it around briefly.
+	s.touch(transferID, st)
 }
 
 // ---- helpers ----
