@@ -673,16 +673,23 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Remove selected-file cache entries after a send succeeds or fails. */
+    /** Release selected-file sources after a send succeeds or fails. */
     public void cleanupPickedFiles(final String json) {
         new Thread(() -> {
             try {
                 JSONArray paths = new JSONArray(json);
-                File root = new File(getCacheDir(), "wails-picker").getCanonicalFile();
                 for (int i = 0; i < paths.length(); i++) {
-                    String raw = paths.optString(i, "");
-                    if (raw.isEmpty()) continue;
-                    File candidate = new File(raw).getCanonicalFile();
+                    String source = paths.optString(i, "");
+                    if (source.isEmpty()) continue;
+                    // In-place sources are dropped from the read server, which
+                    // also deletes any spooled fallback for non-seekable
+                    // providers.
+                    if (source.startsWith("lightpick://")) {
+                        PickReadServer.releaseIfRunning(this, source);
+                        continue;
+                    }
+                    File root = new File(getCacheDir(), "wails-picker").getCanonicalFile();
+                    File candidate = new File(source).getCanonicalFile();
                     String rootPrefix = root.getPath() + File.separator;
                     if (!candidate.getPath().startsWith(rootPrefix)) continue;
                     deleteRecursively(candidate);
@@ -701,9 +708,16 @@ public class MainActivity extends AppCompatActivity {
 
     private void cleanupOldPickerCache() {
         File root = new File(getCacheDir(), "wails-picker");
+        purgeOlderThan(root, 24L * 60L * 60 * 1000L);
+        // Spooled fallbacks for non-seekable providers can be large; drop any
+        // left behind by a crash.
+        purgeOlderThan(new File(getCacheDir(), "light-spool"), 60L * 60L * 1000L);
+    }
+
+    private void purgeOlderThan(File root, long maxAgeMs) {
         File[] entries = root.listFiles();
         if (entries == null) return;
-        long cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L;
+        long cutoff = System.currentTimeMillis() - maxAgeMs;
         for (File entry : entries) {
             if (entry.lastModified() < cutoff) {
                 deleteRecursively(entry);
@@ -846,11 +860,19 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Launch the system document picker. Results are copied into the app's
-     * cache directory so Go receives real filesystem paths. Called by
-     * WailsBridge on the main thread.
+     * Launch the system document picker. Results are served in place by
+     * PickReadServer so Go receives a readable source without a full local copy.
+     * Called by WailsBridge on the main thread.
      */
     public void launchFilePicker(int callbackID, boolean multiple) {
+        launchFilePicker(callbackID, multiple, null);
+    }
+
+    /**
+     * Launch the system document picker, optionally restricted to a set of MIME
+     * types. mimeTypes is null or empty for the unfiltered picker.
+     */
+    public void launchFilePicker(int callbackID, boolean multiple, String[] mimeTypes) {
         synchronized (this) {
             if (pendingFilePickerCallbackID != -1) {
                 // Only one picker can be in flight
@@ -862,7 +884,20 @@ public class MainActivity extends AppCompatActivity {
 
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
+        if (mimeTypes != null && mimeTypes.length > 0) {
+            // EXTRA_MIME_TYPES requires a concrete base type alongside the
+            // specific ones, or the provider may hide everything.
+            String base = mimeTypes[0];
+            int slash = base.indexOf('/');
+            if (slash > 0) {
+                intent.setType(base.substring(0, slash) + "/*");
+            } else {
+                intent.setType("*/*");
+            }
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+        } else {
+            intent.setType("*/*");
+        }
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
         try {
             startActivityForResult(intent, FILE_PICKER_REQUEST);
@@ -944,19 +979,25 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Copy the documents off the main thread, then notify Go
+        // Register the documents with the in-place read server so Go can stream
+        // them without a local copy. Registration is metadata-only on the common
+        // path, so this stays off the main thread but returns promptly.
         new Thread(() -> {
             if (!uris.isEmpty()) {
+                PickReadServer server = PickReadServer.get(this);
                 ExecutorService pool = Executors.newFixedThreadPool(Math.min(uris.size(), 4));
                 try {
                     List<Future<String>> futures = new ArrayList<>();
                     for (Uri uri : uris) {
-                        futures.add(pool.submit(() -> copyUriToCache(uri)));
+                        futures.add(pool.submit(() -> {
+                            PickReadServer.Picked picked = server.register(uri);
+                            return picked == null ? null : picked.source;
+                        }));
                     }
                     for (Future<String> f : futures) {
                         try {
-                            String path = f.get();
-                            if (path != null) bridge.filePickerResult(callbackID, path);
+                            String source = f.get();
+                            if (source != null) bridge.filePickerResult(callbackID, source);
                         } catch (Exception ignored) {
                         }
                     }
@@ -1289,6 +1330,10 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         releaseDiscoveryMulticastLock();
         releaseTransferWifiLock();
+        // PickReadServer is deliberately NOT stopped here: it is a process
+        // singleton holding live transfers, and an activity recreation (rotation)
+        // would otherwise clear every registered source and invalidate the URLs
+        // already handed to the Go uploader. The socket dies with the process.
         super.onDestroy();
         unregisterSystemEventReceivers();
         if (bridge != null) {

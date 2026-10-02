@@ -53,9 +53,12 @@ type Transfer struct {
 	Status      TransferStatus `json:"status"`
 	Error       string         `json:"error,omitempty"`
 	FilePath    string         `json:"filePath,omitempty"`
-	Checksum    string         `json:"checksum,omitempty"`
-	StartedAt   time.Time      `json:"startedAt"`
-	CompletedAt *time.Time     `json:"completedAt,omitempty"`
+	// BatchDir is the subfolder a multi-file batch lands in on the receiver.
+	// Empty for a single-file transfer, which lands flat in the download dir.
+	BatchDir    string     `json:"batchDir,omitempty"`
+	Checksum    string     `json:"checksum,omitempty"`
+	StartedAt   time.Time  `json:"startedAt"`
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
 }
 
 type FileManifestEntry struct {
@@ -71,6 +74,14 @@ type PreparePayload struct {
 	SenderAddr string              `json:"senderAddr,omitempty"`
 	SenderType DeviceType          `json:"senderType,omitempty"`
 	Files      []FileManifestEntry `json:"files"`
+}
+
+// SendFileStat describes one sendable source for the Bulk Share picker.
+type SendFileStat struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	// Error is set when the source could not be resolved; Size is then unknown.
+	Error string `json:"error,omitempty"`
 }
 
 type TransferRequest struct {

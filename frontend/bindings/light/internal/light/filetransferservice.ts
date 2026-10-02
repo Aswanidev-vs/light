@@ -19,8 +19,13 @@ import * as application$0 from "../../../github.com/wailsapp/wails/v3/pkg/applic
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
-export function AcceptReceive(transferID: string, $1: string[]): $CancellablePromise<void> {
-    return $Call.ByID(825001203, transferID, $1);
+/**
+ * AcceptReceive accepts an inbound batch. selected is the subset of filenames the
+ * receiver consented to; a nil slice means the whole batch, which is what an
+ * older client (and auto-accept) sends.
+ */
+export function AcceptReceive(transferID: string, selected: string[]): $CancellablePromise<void> {
+    return $Call.ByID(825001203, transferID, selected);
 }
 
 export function CancelTransfer(id: string): $CancellablePromise<void> {
@@ -55,6 +60,22 @@ export function StartServer(): $CancellablePromise<void> {
     return $Call.ByID(3711350801);
 }
 
+/**
+ * StatFiles resolves the display name and size of send-side paths without
+ * reading their contents. The Bulk Share picker uses it to show a running total
+ * for a staged selection before anything is sent; the native pickers only hand
+ * back paths, so there is no other way to learn the sizes.
+ */
+export function StatFiles(paths: string[]): $CancellablePromise<$models.SendFileStat[]> {
+    return $Call.ByID(2955848779, paths).then(($result: any) => {
+        return $$createType1($result);
+    });
+}
+
 export function StopServer(): $CancellablePromise<void> {
     return $Call.ByID(2089537913);
 }
+
+// Private type creation functions
+const $$createType0 = $models.SendFileStat.createFrom;
+const $$createType1 = $Create.Array($$createType0);

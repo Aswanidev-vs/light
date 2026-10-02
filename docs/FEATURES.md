@@ -13,6 +13,19 @@ instead of a user-facing feature.
 - Configurable transfer server port; the default is `9120`.
 - Multiple files can be selected in one transfer request and uploaded with up
   to four concurrent workers on desktop and two on mobile.
+- **Bulk Share** stages a selection across categories (images, video, audio,
+  documents, games) before sending, so a large mixed selection can be assembled
+  and reviewed before any bytes move. Available on both desktop and Android.
+- Picked documents on Android are read in place over a loopback HTTP server
+  rather than being copied into the app cache first, so the transfer starts
+  immediately and no local duplicate of the selection is created. Each picked
+  source is protected by a per-file random token, and only the app's own
+  loopback traffic can reach it. Providers that expose a non-seekable or
+  unknown-length descriptor are spooled to the cache on a per-file basis.
+- A multi-file batch received on desktop lands in a dated `Bulk-YYYY-MM-DD`
+  subfolder of the download directory. A single-file transfer still lands flat.
+- The incoming accept prompt can untick individual files; unticked files are
+  reported as skipped by the sender rather than as failures.
 - Every Light instance can send and receive. Incoming sender identity and
   address are remembered locally so the receiver can use the Share back action
   or select that peer from the Send view.
@@ -65,10 +78,10 @@ and transfer port are reachable. It does not create a network path by itself.
   and remove it when the operation ends unsuccessfully.
 - Partial files older than 24 hours are pruned when the receive directory is
   used.
-- Android picker copies and stale picker cache entries are cleaned after file
-  selection and during app startup.
-- Android selected files are copied into an app cache before Go receives paths;
-  only that owned picker cache is removed during cleanup.
+- Android picked files are read in place by the app's own loopback read server,
+  so no cache copy is made for sources whose provider supports random access.
+  The frontend releases those sources once a send finishes, and stale spooled
+  fallbacks for non-seekable providers are pruned during app startup.
 
 ## History
 

@@ -163,6 +163,24 @@ public class WailsJSBridge {
     }
 
     /**
+     * Release the sources handed out by the document picker once a send finishes.
+     * Called from JavaScript as wails.cleanupPickedFiles(JSON.stringify(paths)).
+     *
+     * <p>This was previously defined on MainActivity but never registered here,
+     * so the frontend's optional call silently no-opped and picked-file sources
+     * accumulated for the life of the process.
+     */
+    @JavascriptInterface
+    public void cleanupPickedFiles(final String json) {
+        if (DEBUG) Log.d(TAG, "cleanupPickedFiles called");
+        webView.post(() -> {
+            if (webView.getContext() instanceof MainActivity) {
+                ((MainActivity) webView.getContext()).cleanupPickedFiles(json);
+            }
+        });
+    }
+
+    /**
      * Hold the Wi-Fi radio in high-performance mode while transfers run.
      * Called from JavaScript: wails.acquireTransferWifiLock() / wails.releaseTransferWifiLock()
      */

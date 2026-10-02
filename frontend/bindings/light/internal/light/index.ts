@@ -20,6 +20,7 @@ export {
     Device,
     DeviceType,
     Diagnostics,
+    SendFileStat,
     Settings,
     Transfer,
     TransferRequest,

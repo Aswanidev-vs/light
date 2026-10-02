@@ -24,6 +24,30 @@ func setSegmentHeaders(req *http.Request, tid, fname string, size, offset int64,
 	req.Header.Set("X-Segment-Count", strconv.FormatInt(int64(count), 10))
 }
 
+// readReceived locates a transferred file. A multi-file batch lands in a dated
+// Bulk-* subfolder, so resolve through that when it exists.
+func readReceived(t *testing.T, downloadDir, name string) []byte {
+	t.Helper()
+	direct := filepath.Join(downloadDir, name)
+	if data, err := os.ReadFile(direct); err == nil {
+		return data
+	}
+	entries, err := os.ReadDir(downloadDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "Bulk-") {
+			continue
+		}
+		if data, err := os.ReadFile(filepath.Join(downloadDir, e.Name(), name)); err == nil {
+			return data
+		}
+	}
+	t.Fatalf("received file %q not found under %s", name, downloadDir)
+	return nil
+}
+
 // TestUploadWithClientSegmentedReassembly drives the full segmented sender path
 // (parallel ranges + background hash + reassembly) against a real TCP receiver.
 func TestUploadWithClientSegmentedReassembly(t *testing.T) {
@@ -63,7 +87,12 @@ func TestUploadWithClientSegmentedReassembly(t *testing.T) {
 	resp.Body.Close()
 
 	client := newTCPClient()
-	if err := sender.uploadWithClient(tid, server.Listener.Addr().String(), srcPath, fname, size, "", client, "http"); err != nil {
+	src, err := openSendSource(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if err := sender.uploadWithClient(tid, server.Listener.Addr().String(), src, FileManifestEntry{Name: fname, Size: size}, client, "http"); err != nil {
 		t.Fatalf("uploadWithClient segmented: %v", err)
 	}
 
@@ -455,10 +484,7 @@ func TestSendFilesEndToEndTCP(t *testing.T) {
 	}
 
 	check := func(name string, want []byte) {
-		got, err := os.ReadFile(filepath.Join(downloadDir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
+		got := readReceived(t, downloadDir, name)
 		if !bytes.Equal(got, want) {
 			t.Fatalf("%s mismatch (%d vs %d bytes)", name, len(got), len(want))
 		}
@@ -499,7 +525,12 @@ func TestRetryFileOverTCP(t *testing.T) {
 	}
 
 	entry := FileManifestEntry{Name: "big.bin", Size: size}
-	if err := sender.retryFileOverTCP(server.Listener.Addr().String(), srcPath, entry); err != nil {
+	src, err := openSendSource(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if err := sender.retryFileOverTCP(server.Listener.Addr().String(), src, entry); err != nil {
 		t.Fatalf("retryFileOverTCP: %v", err)
 	}
 

@@ -1531,19 +1531,31 @@ public class WailsBridge {
     }
 
     /**
-     * Show the system document picker. optionsJson: {"multiple": bool}.
+     * Show the system document picker.
+     * optionsJson: {"multiple": bool, "mimeTypes": ["image/*", ...]}.
+     * mimeTypes is optional; absent or empty means the unfiltered picker.
      * Results flow back through filePickerResult/filePickerDone.
      */
     public void showFilePicker(final int callbackID, final String optionsJson) {
         boolean multiple = false;
+        String[] mimeTypes = null;
         try {
-            multiple = new JSONObject(optionsJson).optBoolean("multiple", false);
+            JSONObject options = new JSONObject(optionsJson);
+            multiple = options.optBoolean("multiple", false);
+            JSONArray types = options.optJSONArray("mimeTypes");
+            if (types != null && types.length() > 0) {
+                mimeTypes = new String[types.length()];
+                for (int i = 0; i < types.length(); i++) {
+                    mimeTypes[i] = types.optString(i, null);
+                }
+            }
         } catch (Exception ignored) {
         }
         final boolean allowMultiple = multiple;
+        final String[] allowTypes = mimeTypes;
         mainHandler.post(() -> {
             if (activity instanceof MainActivity) {
-                ((MainActivity) activity).launchFilePicker(callbackID, allowMultiple);
+                ((MainActivity) activity).launchFilePicker(callbackID, allowMultiple, allowTypes);
             } else {
                 Log.e(TAG, "showFilePicker: activity is not a MainActivity");
                 nativeFilePickerDone(callbackID);
