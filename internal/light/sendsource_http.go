@@ -23,6 +23,8 @@ var pickHTTPClient = &http.Client{
 		DisableCompression:  true,
 		MaxConnsPerHost:     pickWindowSlots,
 		MaxIdleConnsPerHost: pickWindowSlots,
+		ReadBufferSize:      1 << 20,
+		WriteBufferSize:     1 << 20,
 	},
 	// No client timeout: a single window fetch can legitimately span a slow
 	// content provider. Cancellation is driven by the caller's context instead.
@@ -35,7 +37,7 @@ var pickHTTPClient = &http.Client{
 // read pulls whole window-sized blocks and serves sub-reads out of memory.
 const (
 	pickWindowSize  = 4 << 20 // 4 MiB
-	pickWindowSlots = 6       // at most ~24 MiB resident
+	pickWindowSlots = 16      // match the Android read server's worker pool
 )
 
 // pickWindow is one cached block of the source file.
