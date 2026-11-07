@@ -192,8 +192,15 @@ public final class PickReadServer {
     private void handle(Socket client) {
         try (Socket sock = client) {
             sock.setSoTimeout(30_000);
-            InputStream in = new java.io.BufferedInputStream(sock.getInputStream(), 8 << 10);
-            OutputStream out = new BufferedOutputStream(sock.getOutputStream(), 64 << 10);
+            try {
+                sock.setTcpNoDelay(true);
+                sock.setSendBufferSize(1 << 20);
+                sock.setReceiveBufferSize(1 << 20);
+            } catch (Exception ignored) {
+                // Best effort: the OS may clamp or reject these.
+            }
+            InputStream in = new java.io.BufferedInputStream(sock.getInputStream(), 256 << 10);
+            OutputStream out = new BufferedOutputStream(sock.getOutputStream(), 1 << 20);
 
             Request req = Request.read(in);
             if (req == null) {
@@ -302,16 +309,27 @@ public final class PickReadServer {
 
     private void skipFully(InputStream in, long count) throws IOException {
         long remaining = count;
+        byte[] discard = new byte[256 << 10];
         while (remaining > 0) {
             long n = in.skip(remaining);
             if (n > 0) {
                 remaining -= n;
                 continue;
             }
-            if (in.read() < 0) {
+            // Some providers' skip() is a no-op. Discard in chunks instead of
+            // falling back to a byte-at-a-time loop, which tanks throughput
+            // when a segment has to skip megabytes into a content:// stream.
+            int want = (int) Math.min(discard.length, remaining);
+            int r = in.read(discard, 0, want);
+            if (r < 0) {
                 return;
             }
-            remaining--;
+            if (r == 0) {
+                // Avoid a tight spin if read() reports no progress.
+                Thread.yield();
+                continue;
+            }
+            remaining -= r;
         }
     }
 
